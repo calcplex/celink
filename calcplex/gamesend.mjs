@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 CalcPlex. Part of celink; see README.md and LIBTICALCS.md.
+// Copyright (C) 2026 CalcPlex. Part of celink: https://github.com/calcplex/celink
 import {compatibility} from './core.mjs';
 import {CELink,CELinkError} from '../celink.mjs';
 import {parseFile,TYPE} from '../tifiles.mjs';

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 CalcPlex. Part of celink; see README.md and LIBTICALCS.md.
+// Copyright (C) 2026 CalcPlex. Part of celink: https://github.com/calcplex/celink
 //
 // Send to calculator on the TI-84 Plus CE games hub, on every CE game page,
 // and on the CE math programs page.

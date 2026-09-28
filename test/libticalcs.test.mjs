@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 CalcPlex. Part of celink; see README.md and LIBTICALCS.md.
+// Copyright (C) 2026 CalcPlex. Part of celink: https://github.com/calcplex/celink
 //
 // Tests for the changes made from the libticalcs comparison (see LIBTICALCS.md).
 // Each block names its item number in LIBTICALCS.md.

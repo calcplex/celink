@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 CalcPlex. Part of celink; see README.md and LIBTICALCS.md.
-// Portions derived from libticalcs and libtifiles (tilibs), Copyright (C) the tilibs authors; see LIBTICALCS.md.
+// Copyright (C) 2026 CalcPlex. Part of celink: https://github.com/calcplex/celink
+// Portions derived from libticalcs and libtifiles (tilibs), Copyright (C) the tilibs authors; see LIBTICALCS.md in that repository.
 //
 // A simulated TI-84 Plus CE that speaks the documented USB protocol from the
 // calculator's side, behind the same USBDevice-shaped interface WebUSB gives

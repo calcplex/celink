@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Copyright (C) 2026 CalcPlex. Part of celink; see README.md and LIBTICALCS.md.
+// Copyright (C) 2026 CalcPlex. Part of celink: https://github.com/calcplex/celink
 //
 // Flash applications (.8ek): parsing, sending, receiving, deleting, listing.
 // Built from the libticalcs comparison, LIBTICALCS.md A; see README.md.
