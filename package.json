@@ -1,0 +1,12 @@
+{
+  "name": "celink",
+  "version": "1.0.0",
+  "description": "WebUSB link to a TI-84 Plus CE: send, receive, list and delete variables and Flash applications from a web page.",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs calcplex/test/*.test.mjs"
+  }
+}
