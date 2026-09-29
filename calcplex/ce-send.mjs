@@ -9,7 +9,7 @@
 // Without WebUSB, or on a phone, the page keeps its download buttons only.
 import { PROGRAMS, sendGame, collectEntries, isAssembly, inspect, jailbreakState, unpackZip, pickCalculator } from './gamesend.mjs';
 import {
-  PREVIEW_HOST, TICONNECT_URL, calcParams, esc, failReason, isChromeOS, isWindows, linkDead, refusal, refusalText,
+  PREVIEW_HOST, TICONNECT_URL, calcParams, esc, failReason, refusedAt, isChromeOS, isWindows, linkDead, refusal, refusalText,
   startHint, track, trackConnectFail,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
@@ -279,7 +279,7 @@ async function run({ file, label, say, show }) {
     try {
       r = await sendGame(link, files, { onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); } });
     } catch (err) {
-      track('ce_send_fail', { game, reason: failReason(err), page });
+      track('ce_send_fail', { game, reason: failReason(err), page, ...refusedAt(err) });
       if (linkDead(err)) await drop();
       throw err;
     }

@@ -253,13 +253,25 @@ export function track(event, params) {
 /** ce_connect_fail, with where the connect died when the error says. */
 export function trackConnectFail(err, extra = {}) {
   const detail = openDetail(err);
-  track('ce_connect_fail', { reason: failReason(err), ...(detail && { open_detail: detail }), ...extra });
+  track('ce_connect_fail', { reason: failReason(err), ...(detail && { open_detail: detail }), ...refusedAt(err), ...extra });
+}
+
+/**
+ * `at` for a calculator refusal: the operation and the reply that carried it,
+ * e.g. `send_rts`, or `ready_mode_before_send` when the ready step before a
+ * send was refused. Nothing for any other error. Error 0x0036 has no known
+ * meaning, so where it happens is the first clue to its cause.
+ */
+export function refusedAt(err) {
+  if (err?.code !== 'CALC_ERROR' || !err.op || !err.step) return {};
+  return { at: `${err.op}_${err.step}${err.readying ? `_before_${err.readying}` : ''}` };
 }
 
 // The site's analytics name the OS and model parameters evo_os and evo_hw on
-// every calculator's pages.
-export function calcParams({ os, model }) {
-  return { evo_os: os, evo_hw: model };
+// every calculator's pages. `home` is 1 when the calculator was on its home
+// screen at connect.
+export function calcParams({ os, model, home }) {
+  return { evo_os: os, evo_hw: model, ...(home === undefined ? {} : { home: home ? 1 : 0 }) };
 }
 
 const LINK_DEAD = [...LINK_LOST, 'LINK_CLOSED'];

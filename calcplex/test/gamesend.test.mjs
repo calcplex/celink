@@ -9,8 +9,9 @@ import { readFileSync } from 'node:fs';
 import { deflateRawSync } from 'node:zlib';
 import {
   sendGame, collectEntries, planInstall, checkSpace, library, unpackZip, crc32, gameEntries,
-  jailbreakTools, jailbreakState, inspect, fixSizeWord, pickCalculator,
+  jailbreakTools, jailbreakState, inspect, identify, fixSizeWord, pickCalculator,
 } from '../gamesend.mjs';
+import { refusedAt } from '../core.mjs';
 import { CELink, VPKT } from '../../celink.mjs';
 import { buildFile, makeEntry, TYPE } from '../../tifiles.mjs';
 import { SimulatedCalculator } from '../../sim/calculator.mjs';
@@ -385,4 +386,21 @@ test('pickCalculator reuses the one granted calculator and prompts otherwise', a
   assert.equal(prompts, 1);
   await pickCalculator({ usb: usb([sim, new SimulatedCalculator()]) });
   assert.equal(prompts, 2);
+});
+
+test('a refused send says where: the Request to Send, or the ready step before an exchange', async () => {
+  const rts = await open({ refuse: { step: 'rts', code: 0x0036 } });
+  const atRts = await sendGame(rts.link, [SNAKE]).catch(e => e);
+  assert.equal(atRts.code, 'CALC_ERROR');
+  assert.deepEqual(refusedAt(atRts), { at: 'send_rts' });
+  const mode = await open({ refuse: { step: 'mode', code: 0x0036, times: 1 } });
+  const atMode = await sendGame(mode.link, [SNAKE]).catch(e => e);
+  assert.equal(atMode.code, 'CALC_ERROR');
+  assert.match(refusedAt(atMode).at, /^ready_mode_before_[a-z]+$/);
+});
+
+test('identify reports whether the calculator is on its home screen', async () => {
+  const { link } = await open();
+  await link.ready();
+  assert.equal(typeof (await identify(link)).home, 'boolean');
 });

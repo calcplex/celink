@@ -11,7 +11,7 @@ import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
   INEQUALZ_URL, OFFICIAL, PREVIEW_HOST, ROUTES, TICONNECT_URL, calcParams, compatibility, esc, fetchOfficial,
   identifyOfficial, inequalzStatus, installerFailReason, isChromeOS, isWindows, linkDead, needsAsm, officialFiles,
-  parseFlashApp, parseVariable, refusal, refusalText, startHint, track, trackConnectFail, unknownRefusal,
+  parseFlashApp, parseVariable, refusal, refusalText, refusedAt, startHint, track, trackConnectFail, unknownRefusal,
 } from './core.mjs';
 import { CELinkError } from '../celink.mjs';
 
@@ -177,7 +177,7 @@ async function tracked(game, send) {
     await send();
   } catch (err) {
     console.warn(`${game} failed:`, err?.code, err?.message);
-    track('ce_send_fail', { game, reason: installerFailReason(err) });
+    track('ce_send_fail', { game, reason: installerFailReason(err), ...refusedAt(err) });
     throw err;
   }
   track('ce_send_success', { game, retried: 0 });
@@ -644,7 +644,7 @@ function fetchHosted(files) {
     } catch (err) {
       const li = document.querySelector(`#cec-filelist li[data-file="${f.file}"]`);
       if (li) li.querySelector('.cec-state').textContent = 'pick it below';
-      track('ce_send_fail', { game: 'ARTIFICE_FETCH', reason: installerFailReason(err) });
+      track('ce_send_fail', { game: 'ARTIFICE_FETCH', reason: installerFailReason(err), ...refusedAt(err) });
       const fallback = $('#cec-fallback');
       if (fallback) fallback.hidden = false;
     }
@@ -805,7 +805,7 @@ function sendGameButton(game) {
         if (link === transport.link) transport.poisoned = true;
         playLink = null;
       }
-      track('ce_send_fail', { game: game.name, reason: installerFailReason(err) });
+      track('ce_send_fail', { game: game.name, reason: installerFailReason(err), ...refusedAt(err) });
       throw err;
     }
   });

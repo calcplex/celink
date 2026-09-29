@@ -48,7 +48,7 @@ export class CETransport {
       await this.link.open();
       return readyEach(this.link).info();
     });
-    this.info = checkCalculator(calc.productName, calc.osVersion);
+    this.info = { ...checkCalculator(calc.productName, calc.osVersion), home: calc.atHomescreen };
     return this.info;
   }
 

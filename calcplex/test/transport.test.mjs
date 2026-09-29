@@ -82,7 +82,7 @@ test('connect picks a TI device, opens it and routes off its OS', async () => {
   const usb = picker(sim);
   await withUsb(usb, async () => {
     const t = new CETransport();
-    assert.deepEqual(await t.connect(), { model: 'TI-84 Plus CE', os: '5.8.5.0074', route: 'v3' });
+    assert.deepEqual(await t.connect(), { model: 'TI-84 Plus CE', os: '5.8.5.0074', route: 'v3', home: true });
     assert.equal(t.device, sim);
     assert.deepEqual(usb.asked[0].filters, [{ vendorId: 0x0451 }]);
   });

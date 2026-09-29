@@ -4,10 +4,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  OFFICIAL, ROUTES, checkCalculator, compatibility, digest, esc, failReason, fetchOfficial, identifyOfficial, inequalzStatus,
+  OFFICIAL, ROUTES, calcParams, checkCalculator, compatibility, digest, esc, failReason, fetchOfficial, identifyOfficial, inequalzStatus,
   installerFailReason, isCE, isChromeOS, isWindows, linkDead, linkReason, needsAsm, officialFiles, openDetail, parseFlashApp,
-  parseVariable, refusalText, sameVariable, startHint, unknownRefusal,
+  parseVariable, refusalText, refusedAt, sameVariable, startHint, unknownRefusal,
 } from '../core.mjs';
+import { CELinkError } from '../../celink.mjs';
 import { TYPE } from '../../tifiles.mjs';
 import { appSection, patched } from '../../test/testkit.mjs';
 
@@ -284,4 +285,21 @@ test('openDetail: <step>_<cause> for OPEN_FAILED, no_reply for TIMEOUT, never br
   assert.equal(openDetail({ code: 'TIMEOUT' }), 'no_reply');
   assert.equal(openDetail({ code: 'NO_DEVICE_SELECTED' }), undefined);
   assert.equal(openDetail(null), undefined);
+});
+
+test('refusedAt: the operation and step a calculator refused, and nothing for other errors', () => {
+  const refused = extra => new CELinkError('CALC_ERROR', 'refused', { calcError: 0x0036, ...extra });
+  assert.deepEqual(refusedAt(refused({ op: 'send', step: 'rts' })), { at: 'send_rts' });
+  const readying = refused({ op: 'ready', step: 'mode' });
+  readying.readying = 'send';
+  assert.deepEqual(refusedAt(readying), { at: 'ready_mode_before_send' });
+  assert.deepEqual(refusedAt(new CELinkError('TIMEOUT', 'no reply')), {});
+  assert.deepEqual(refusedAt(refused({})), {});
+  assert.deepEqual(refusedAt(undefined), {});
+});
+
+test('calcParams reports the home screen as 1 or 0, and leaves it out when unknown', () => {
+  assert.deepEqual(calcParams({ os: '5.8.4.0058', model: 'TI-84 Plus CE', home: true }), { evo_os: '5.8.4.0058', evo_hw: 'TI-84 Plus CE', home: 1 });
+  assert.equal(calcParams({ os: '5.3.0.0037', model: 'TI-84 Plus CE', home: false }).home, 0);
+  assert.equal('home' in calcParams({ os: '5.3.0.0037', model: 'TI-84 Plus CE' }), false);
 });

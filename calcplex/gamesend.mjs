@@ -129,7 +129,7 @@ export async function identify(link) {
   }
   return {
     model: info.productName, os: info.osVersion, route: compatibility(info.osVersion),
-    ramFree: info.ramFree, archiveFree: info.archiveFree,
+    ramFree: info.ramFree, archiveFree: info.archiveFree, home: info.atHomescreen,
   };
 }
 
