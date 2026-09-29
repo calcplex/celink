@@ -1,224 +1,163 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 CalcPlex. Part of celink: https://github.com/calcplex/celink
-import {digest,officialFiles,parseFlashApp,parseInfo,parseVariable,sameVariable} from './core.mjs';
-import {CELink,CELinkError} from '../celink.mjs';
-import {buildFile,parseFile,TYPE} from '../tifiles.mjs';
-// Adapter from the installer to celink (../celink.mjs).
 //
-// The method names and return shapes below are the ones the wizard calls.
-// Underneath, celink serialises its own operations, carries stable error
-// CODES rather than sentences, and reports a landing reboot as a result
-// instead of a failure.
-//
-// TIMEOUTS. celink's are per USB transfer, not per operation: `timeout` 3s,
-// `streamTimeout` 15s while variable data streams, `appTimeout` 30s around a
-// Flash write. The variable defaults are left alone. The Flash one is NOT: a
-// megabyte of application is the slowest thing this page sends, so sendApp
-// gives that write a 300s budget.
-//
-// POISONING. Only the failures that actually close the link (LINK_DROP below)
-// set `poisoned`. Any other calculator error leaves the link usable, so a
-// retry can work without a page reload.
-const LINK_DROP=new Set(['TIMEOUT','USB_ERROR','DISCONNECTED','PROTOCOL','LINK_CLOSED']);
-// WHERE A NAME CAN CLASH. The CE keeps math values (real, complex, fraction,
-// list...) apart from the named table of programs, AppVars and groups, and a
-// real A sits beside program A without either noticing. Only this table is
-// ever compared: matching on name alone would make the real A that `5→A`
-// leaves behind block arTIfiCE v2.1 (program A) with "A already exists".
-const NAMED=[TYPE.PROGRAM,TYPE.PROTECTED_PROGRAM,TYPE.APPVAR,TYPE.TEMP_PROGRAM,TYPE.GROUP];
-const clashes=(entries,name)=>entries.filter(e=>e.name===name&&NAMED.includes(e.type));
+// The jailbreak installer's side of celink: one calculator, the collision
+// rules, and a read-back after every send.
+import { NAMED, checkCalculator, digest, linkDead, officialFiles, parseFlashApp, parseVariable, refusal, sameVariable } from './core.mjs';
+import { readyEach } from './gamesend.mjs';
+import { CELink } from '../celink.mjs';
+import { buildFile, parseAppFile, parseFile } from '../tifiles.mjs';
+
+const clashes = (rows, name) => rows.filter(r => r.name === name && NAMED.includes(r.type));
+
+// A Flash write erases and writes up to a megabyte before it is acknowledged.
+const APP_TIMEOUT_MS = 300000;
+
 export class CETransport {
-  constructor(log=()=>{}) {this.log=log;this.poisoned=false;this.link=null;this.device=null;this.info=null;this.calc=null;}
-  // Every celink call goes through here so one rule decides what kills the link.
-  async guard(fn) {
-    if(this.poisoned)throw Error('Reconnect by unplugging the calculator and reloading this page.');
+  link = null;
+  device = null;
+  info = null;
+  /** Set once the link has died; every later call refuses until a reload. */
+  poisoned = false;
+
+  async #guard(fn) {
+    if (this.poisoned) throw refusal('POISONED', 'Reconnect by unplugging the calculator and reloading this page.');
     try {
       return await fn();
-    } catch(err) {
-      if(err instanceof CELinkError && LINK_DROP.has(err.code)) this.poisoned=true;
+    } catch (err) {
+      if (linkDead(err)) this.poisoned = true;
       throw err;
     }
   }
+
+  #exchange(fn) {
+    return this.#guard(() => fn(readyEach(this.link)));
+  }
+
+  /**
+   * Pick, open and identify the calculator: { model, os, route }. The picker
+   * opens every time, before anything else is awaited, so it keeps the
+   * click's activation.
+   */
   async connect() {
-    if(!navigator.usb)throw Error('Use Chrome or Edge on a computer for direct USB. The manual guide works in other browsers.');
-    // This call stays before all awaited initialization so browser activation is preserved.
-    this.link=await CELink.request();
-    this.device=this.link.device;
-    const granted=await CELink.granted();
-    if(granted.length!==1)throw Error('Connect only one TI calculator, then reload and try again.');
-    await this.guard(async()=>{
+    if (!navigator.usb) throw refusal('NO_WEBUSB', 'Use Chrome or Edge on a computer for direct USB. The manual guide works in other browsers.');
+    this.link = await CELink.request({ appTimeout: APP_TIMEOUT_MS });
+    this.device = this.link.device;
+    if ((await CELink.granted()).length !== 1) throw refusal('SEVERAL_CALCULATORS', 'Connect only one TI calculator, then reload and try again.');
+    const calc = await this.#guard(async () => {
       await this.link.open();
-      this.calc=await this.link.info();
+      return readyEach(this.link).info();
     });
-    this.log('Model: '+this.calc.productName);
-    this.log('OS Version: '+this.calc.osVersion);
-    // parseInfo does the model check, the exact-version check and the routing,
-    // with the wording the wizard shows. celink hands over fields, so the one
-    // line parseInfo reads is built here rather than the checks being copied
-    // out of core.mjs. An unreadable version arrives as "undefined" and is
-    // refused there.
-    this.info=parseInfo(`OS Version: ${this.calc.osVersion}`,this.calc.productName);
+    this.info = checkCalculator(calc.productName, calc.osVersion);
     return this.info;
   }
-  // The calculator's directory in the shape the wizard reads:
-  // {memory, vars:[...], apps:[...]}. `apps` is its own array, which is what
-  // the Inequalz check reads. celink's listApps() is list() filtered to type
-  // 0x24, so this splits ONE listing rather than asking the calculator twice.
-  // Returned WITHOUT throwing on an empty apps array, because "the calculator
-  // did not report its apps" is an answer the wizard shows rather than an
-  // error: inequalzStatus turns it into 'unknown'.
-  async listing() {
-    const rows=await this.guard(()=>this.link.list());
-    const row=r=>({name:r.name,type:r.type,archived:r.archived,size:r.size});
-    return {
-      memory:this.calc?{ram:this.calc.ramFree,archive:this.calc.archiveFree}:null,
-      vars:rows.filter(r=>r.type!==TYPE.FLASH_APP).map(row),
-      apps:rows.filter(r=>r.type===TYPE.FLASH_APP).map(row),
-    };
+
+  /** Every variable and application on the calculator, as list() rows. */
+  directory() {
+    return this.#exchange(link => link.list());
   }
-  // Every name on the calculator, variables and apps together. Collision
-  // checks use this, and they DO require both arrays: refusing to send is the
-  // right move when the calculator will not say what is already on it.
-  async directory() {
-    const listing=await this.listing();
-    if(!Array.isArray(listing.vars)||!Array.isArray(listing.apps))throw Error('The calculator directory could not be checked. No file was sent.');
-    return [...listing.vars,...listing.apps];
-  }
-  // celink hands back a parsed entry; the callers here compare whole files, so
-  // it is rebuilt into one. buildFile writes the same 13-byte entry header
-  // core.mjs's parseVariable expects, so the round trip is exact.
+
+  /** A variable read back off the calculator, as a file. */
   async receive(entry) {
-    const got=await this.guard(()=>this.link.receive(entry.name,entry.type));
-    return buildFile([got]);
+    return buildFile([await this.#exchange(link => link.receive(entry.name, entry.type))]);
   }
-  // Collision check on its own, with no transfer of the files themselves. The
-  // v3 trigger AppVar is sent while the Inequalz app is open, and a directory
-  // listing in that state is untested, so the wizard checks every file it is going to send WHILE THE CALCULATOR IS STILL
-  // ON THE HOME SCREEN. A jailbreak file (`replaces`) clears its own way here:
-  // anything of another type under its name is deleted, and so is the
-  // trigger's own name, since overwriting it inside Inequalz is untested and a
-  // retry of a half-finished v3 install always finds one. Anything else
-  // that clashes still refuses the whole route up front.
+
+  /**
+   * Clear the way for every file of a route while the calculator is still on
+   * the home screen: the v3 trigger is later sent with an app open, where a
+   * listing has never been tried. A jailbreak file deletes what holds its
+   * name (the trigger's own old copy too); any other clash refuses the route.
+   */
   async precheck(files) {
-    const entries=await this.directory();
-    const refused=[];
-    for(const f of files) {
-      const existing=clashes(entries,f.name);
-      if(!existing.length) continue;
-      if(!f.replaces) {refused.push(f.name);continue;}
-      await this.clearFor(f,existing,{all:!!f.expectReboot});
+    const rows = await this.directory();
+    const refused = [];
+    for (const f of files) {
+      const existing = clashes(rows, f.name);
+      if (!existing.length) continue;
+      if (f.replaces) await this.#clear(f, existing, { all: !!f.expectReboot });
+      else refused.push(f.name);
     }
-    if(refused.length)throw Error(refused.length===1
-      ? `${refused[0]} already exists on the calculator and this file does not replace it. Nothing was sent. Rename or delete it on the calculator, then start over.`
-      : `${refused.join(' and ')} already exist on the calculator and these files do not replace them. Nothing was sent. Rename or delete them on the calculator, then start over.`);
-    return true;
-  }
-  // A jailbreak file is sent under its own name, and a variable with that
-  // name is replaced, whatever its type. A same-type entry is left for the
-  // send to overwrite silently (observed on hardware for program A); anything
-  // else under the name is deleted first, because a send never replaces a
-  // different type. `all` deletes the same-type entry too.
-  async clearFor(spec,existing,{all=false}={}) {
-    for(const e of existing) {
-      if(!all && e.type===spec.type) continue;
-      await this.guard(()=>this.link.delete(e.name,e.type));
+    if (refused.length === 1) {
+      throw refusal('COLLISION', `${refused[0]} already exists on the calculator and this file does not replace it. Nothing was sent. Rename or delete it on the calculator, then start over.`, { names: refused });
+    }
+    if (refused.length) {
+      throw refusal('COLLISION', `${refused.join(' and ')} already exist on the calculator and these files do not replace them. Nothing was sent. Rename or delete them on the calculator, then start over.`, { names: refused });
     }
   }
-  async sendVerified(bytes,{official=null,route=null,skipDirectory=false,onProgress=null}={}) {
-    if(!this.info)throw Error('Connect and read the OS first.');
-    const wanted=route||this.info.route;
-    if(official&&wanted!==this.info.route)throw Error('This OS is not on the route that file belongs to.');
-    const entry=parseVariable(bytes);
-    // An official file is only accepted on its own route and only at its pinned
-    // hash, name and type. A stray file can never reach the replacement policy.
-    if(official) {
-      const spec=officialFiles(this.info.route).find(f=>f.file===official.file);
-      if(!spec)throw Error('This OS is not on the route that file belongs to.');
-      if(entry.name!==spec.name||entry.type!==spec.type||await digest(bytes)!==spec.sha256)
-        throw Error(`${spec.file} does not match the verified ${spec.file.startsWith('arTIfiCE')?'arTIfiCE':'official'} release. Nothing was sent.`);
-      official=spec;
+
+  // A send overwrites a variable of the same type (observed on hardware for
+  // program A) but never one of another type, so those are deleted first.
+  // `all` deletes the same-type one too.
+  async #clear(spec, existing, { all = false } = {}) {
+    for (const e of existing) {
+      if (e.type === spec.type && !all) continue;
+      await this.#exchange(link => link.delete(e.name, e.type));
     }
-    // Anything else keeps collision protection; a jailbreak file (`replaces`)
-    // clears its name and goes through.
-    if(!skipDirectory) {
-      const existing=clashes(await this.directory(),entry.name);
-      if(existing.length && official?.replaces) {
-        await this.clearFor(official,existing);
-      } else if(existing.length) {
-        if(existing.length===1 && existing[0].type===entry.type && sameVariable(bytes,await this.receive(entry))) {
-          return {name:entry.name,alreadyPresent:true,verified:true};
+  }
+
+  /**
+   * Send one variable file and read it back. `official` is a spec from
+   * core.OFFICIAL: accepted only on its own route and at its pinned hash, and
+   * then allowed to replace what holds its name. Any other file refuses to
+   * overwrite, unless the calculator already holds an identical copy.
+   * `skipDirectory` is for the v3 trigger, sent with an app open.
+   */
+  async sendVerified(bytes, { official = null, skipDirectory = false } = {}) {
+    if (!this.info) throw refusal('NOT_CONNECTED', 'Connect and read the OS first.');
+    const entry = parseVariable(bytes);
+    const spec = official && await this.#checkOfficial(official, entry, bytes);
+    if (!skipDirectory) {
+      const existing = clashes(await this.directory(), entry.name);
+      if (existing.length && spec?.replaces) await this.#clear(spec, existing);
+      else if (existing.length) {
+        if (existing.length === 1 && existing[0].type === entry.type && sameVariable(bytes, await this.receive(entry))) {
+          return { name: entry.name, alreadyPresent: true, verified: true };
         }
-        throw Error(`${entry.name} already exists and does not exactly match this file. Nothing was overwritten. Choose a different file or resolve the name on the calculator.`);
+        throw refusal('COLLISION', `${entry.name} already exists and does not exactly match this file. Nothing was overwritten. Choose a different file or resolve the name on the calculator.`, { names: [entry.name] });
       }
     }
-    // core's parseVariable is the gate; celink's parser is what produces the
-    // entry to put on the wire (its version byte, its name bytes, and the
-    // ARCHIVED FLAG THE FILE ITSELF CARRIES). That flag is not cosmetic:
-    // arTIfiCE_v2.1.8xp is flagged archived and the other two are not, and they
-    // are sent exactly that way.
-    const file=parseFile(bytes).entries[0];
-    const sent=await this.guard(()=>this.link.send(file,{
-      archive:file.archived,
-      onProgress:onProgress||undefined,
-      rebootOnLanding:!!official?.expectReboot,
-    }));
-    // The v3 trigger AppVar reboots the calculator, so there is no link left to
-    // read it back over. That step is confirmed by the person looking at the
-    // calculator, and the wizard says so instead of claiming a verification it
-    // did not make.
-    //
-    // The reboot arrives in one of TWO shapes, and both end here. celink can
-    // report the link dropping while the AppVar lands, which is what the
-    // simulator does and what a calculator that resets mid-transfer does. A
-    // 5.8.5 calculator on hardware did neither: it acknowledged the AppVar
-    // normally, so the send came back `rebooted:false`, and only THEN ran
-    // arTIfiCE's installer and restarted. The link was already gone by the
-    // time the read-back's first packet went out, and it came back as
-    // `USB_ERROR ... USB status "stall"` from inside celink's _begin, although
-    // the install had worked.
-    //
-    // So the read-back is still ATTEMPTED (a calculator that took the AppVar
-    // and did not restart is checked like any other send), and only a link
-    // that has gone is read as the restart. Nothing extra goes on the wire;
-    // the same exchange is only read differently.
-    const landed={name:entry.name,alreadyPresent:false,verified:false,rebooted:true};
-    if(official?.expectReboot && sent.rebooted) {
-      this.poisoned=true;
-      return landed;
+    // parseFile's entry carries the file's own archived flag, which send() keeps.
+    const file = parseFile(bytes).entries[0];
+    const sent = await this.#exchange(link => link.send(file, { rebootOnLanding: !!spec?.expectReboot }));
+    const back = sent.rebooted ? null : await this.#readBack(entry, spec);
+    if (!back) {
+      this.poisoned = true;
+      return { name: entry.name, alreadyPresent: false, verified: false, rebooted: true };
     }
-    let returned;
+    if (!sameVariable(bytes, back)) throw refusal('NOT_VERIFIED', 'The read-back data did not match. Stop here; the transfer is not verified.');
+    return { name: entry.name, alreadyPresent: false, verified: true };
+  }
+
+  async #checkOfficial(official, entry, bytes) {
+    const spec = officialFiles(this.info.route).find(f => f.file === official.file);
+    if (!spec) throw refusal('WRONG_ROUTE', 'This OS is not on the route that file belongs to.');
+    if (entry.name !== spec.name || entry.type !== spec.type || await digest(bytes) !== spec.sha256) {
+      const release = spec.file.startsWith('arTIfiCE') ? 'arTIfiCE' : 'official';
+      throw refusal('BAD_HASH', `${spec.file} does not match the verified ${release} release. Nothing was sent.`);
+    }
+    return spec;
+  }
+
+  // The v3 trigger can also be acknowledged normally, with the restart just
+  // after (observed on hardware on 5.8.5): the read-back then finds the link
+  // gone, and that is the install, not a failure. Returns null for it.
+  async #readBack(entry, spec) {
     try {
-      returned=await this.receive(entry);
-    } catch(err) {
-      if(official?.expectReboot && err instanceof CELinkError && LINK_DROP.has(err.code)) {
-        this.poisoned=true;
-        return landed;
-      }
+      return await this.receive(entry);
+    } catch (err) {
+      if (spec?.expectReboot && linkDead(err)) return null;
       throw err;
     }
-    if(!sameVariable(bytes,returned))throw Error('The read-back data did not match. Stop here; the transfer is not verified.');
-    return {name:entry.name,alreadyPresent:false,verified:true};
   }
-  // The ONE path that sends something that is not a variable: TI's Inequality
-  // Graphing app, which arTIfiCE v3 installs through and which this project
-  // does not host. The file is the person's own download from TI.
-  //
-  // Why this is a separate method and not a flag on sendVerified: writing Flash
-  // has to be a deliberate call. celink enforces that from its side too
-  // (send() refuses an application with UNSUPPORTED_TYPE and sendApp() is the
-  // only writer it has), and parseFlashApp stands in front of it here,
-  // refusing a file with ANY operating-system entry whatever the entry order
-  // is. sendVerified's own parser stays just as strict.
-  //
-  // There is no read-back: a Flash app is not a variable and pulling the whole
-  // megabyte back would cost more than it proves. The caller confirms by
-  // re-reading the app list, which is what the calculator itself reports.
-  async sendApp(bytes,{timeout=300000,onProgress=null}={}) {
-    if(!this.info)throw Error('Connect and read the OS first.');
-    const app=parseFlashApp(bytes);
-    const parsed=parseFile(bytes);
-    this.link.appTimeout=timeout;
-    await this.guard(()=>this.link.sendApp(parsed,{onProgress:onProgress||undefined}));
-    return {name:app.name,sent:true};
+
+  /**
+   * Write TI's Flash application (a .8ek). No read-back: the caller confirms
+   * by listing the apps, which is what the calculator itself reports.
+   */
+  async sendApp(bytes, { onProgress } = {}) {
+    if (!this.info) throw refusal('NOT_CONNECTED', 'Connect and read the OS first.');
+    const { name } = parseFlashApp(bytes);
+    await this.#exchange(link => link.sendApp(parseAppFile(bytes), { onProgress }));
+    return { name, sent: true };
   }
 }

@@ -1,297 +1,384 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 CalcPlex. Part of celink: https://github.com/calcplex/celink
-// Portions derived from libticalcs and libtifiles (tilibs), Copyright (C) the tilibs authors; see LIBTICALCS.md in that repository.
+// Derived from libticalcs (tilibs), Copyright (C) the tilibs authors; see CREDITS.md in the celink repository.
 //
-// Talk to a TI-84 Plus CE over WebUSB: read its parameters, list, send,
-// receive and delete variables. No dependencies; works in a browser with
-// WebUSB and in Node against any object shaped like a USBDevice.
+// A TI-84 Plus CE over WebUSB: its parameters, and listing, sending,
+// receiving and deleting variables and Flash applications. It follows
+// libticalcs' DUSB code for the CE, and says why wherever it does not. Runs in
+// a browser, and in Node against any object shaped like a USBDevice.
 //
-// Layers, bottom up (all protocol numbers are big-endian):
-//   raw packet      LLLLLLLL TT data...        (TT 1..5, one per USB transfer)
-//   virtual packet  LLLLLLLL TTTT data...      (carried in raw type 3/4 packets)
-//   operation       buffer size negotiation, Ping/Set Mode, then one command
+//   raw packet      u32 size, u8 type, data     one per USB transfer
+//   virtual packet  u32 size, u16 type, data    carried in raw packets of type 3 and 4
 //
-// Anything this file had to guess is gathered in, and documented inline in,
-// `DEFAULT_QUIRKS`.
+// Protocol numbers are big-endian.
 
-import { typeName, nameToString, nameToBytes, canonicalName, parseFile, parseAppFile, appNameFromData, TYPE } from './tifiles.mjs';
+import { TYPE, typeName, nameToBytes, nameToString } from './tifiles.mjs';
 
 export const TI_VENDOR_ID = 0x0451;
-/** USB product id of the TI-84 Plus CE. Not used as a filter. */
-export const CE_PRODUCT_ID = 0xE008;
 
-// Packet numbers and most descriptions from Benjamin Moody's 2006 analysis,
-// "The TI-84 Plus USB Protocol: A Partial Analysis". Several constant names
-// (VAR_HDR, VAR_CNTS, DIR_REQ, VAR_REQ, RTS, DATA_ACK, EOT) follow libticalcs'
-// dusb_vpkt.h, and 0xBB00's name and meaning come from libticalcs (Moody lists
-// it as unknown); see LIBTICALCS.md.
-export const RAW = Object.freeze({ BUF_REQ: 1, BUF_ALLOC: 2, DATA: 3, DATA_FINAL: 4, ACK: 5 });
+const RAW = Object.freeze({ BUF_REQ: 1, BUF_ALLOC: 2, DATA: 3, DATA_LAST: 4, ACK: 5 });
 
 export const VPKT = Object.freeze({
-  PING: 0x0001, PARAM_REQ: 0x0007, PARAM_DATA: 0x0008, DIR_REQ: 0x0009,
-  VAR_HDR: 0x000A, RTS: 0x000B, VAR_REQ: 0x000C, VAR_CNTS: 0x000D, PARAM_SET: 0x000E,
-  DEL_VAR: 0x0010, MODE_ACK: 0x0012, DATA_ACK: 0xAA00, DELAY: 0xBB00, EOT: 0xDD00, ERROR: 0xEE00,
+  PING: 0x0001, PARAM_REQ: 0x0007, PARAM_DATA: 0x0008, DIR_REQ: 0x0009, VAR_HDR: 0x000A,
+  RTS: 0x000B, VAR_REQ: 0x000C, VAR_CNTS: 0x000D, MODIF_VAR: 0x0010, MODE_ACK: 0x0012,
+  DATA_ACK: 0xAA00, DELAY_ACK: 0xBB00, EOT: 0xDD00, ERROR: 0xEE00,
 });
 
-const VPKT_NAMES = {
-  0x0001: 'Ping / Set Mode', 0x0002: 'Begin OS Transfer', 0x0003: 'Ack of OS Transfer',
-  0x0005: 'OS Data', 0x0006: 'Ack of EOT', 0x0007: 'Parameter Request', 0x0008: 'Parameter Data',
-  0x0009: 'Request Directory Listing', 0x000A: 'Variable Header', 0x000B: 'Request to Send',
-  0x000C: 'Request Variable', 0x000D: 'Variable Contents', 0x000E: 'Parameter Set',
-  0x0010: 'Delete Variable', 0x0011: 'Unknown 0x0011', 0x0012: 'Ack of Mode Setting',
-  0xAA00: 'Ack of Data', 0xBB00: 'Delay Acknowledgement', 0xDD00: 'End of Transmission', 0xEE00: 'Error',
-};
+const ATTR = Object.freeze({ SIZE: 0x0001, TYPE: 0x0002, ARCHIVED: 0x0003, VERSION: 0x0008, DATATYPE: 0x0011 });
 
-export const ATTR = Object.freeze({ SIZE: 0x0001, TYPE: 0x0002, ARCHIVED: 0x0003, VERSION: 0x0008, TYPE_REQ: 0x0011 });
-
-/** Request to Send mode flag: 0x01 is a silent send, which the CE accepts without
- *  asking and which overwrites a variable of the same name and type. (0x02, the
- *  non-silent form, is not supported by the CE for ordinary variables.)
- *  (libticalcs; LIBTICALCS.md 23) */
-const SILENT_SEND = 0x01;
-/** Delete: the protection mode byte. 0x01 bypasses file protection, so archived
- *  and locked variables can be deleted; 0x00 would honour it. */
-const BYPASS_PROTECTION = 0x01;
-
-export const PARAM = Object.freeze({
+const PARAM = Object.freeze({
   PRODUCT_NUMBER: 0x0001, PRODUCT_NAME: 0x0002, HW_VERSION: 0x0004, LANGUAGE: 0x0006,
-  SUB_LANGUAGE: 0x0007, DEVICE_TYPE: 0x0008, BOOT_VERSION: 0x0009, OS_LOADED: 0x000A,
-  OS_VERSION: 0x000B, RAM_PHYS: 0x000C, RAM_USER: 0x000D, RAM_FREE: 0x000E,
-  FLASH_PHYS: 0x000F, FLASH_USER: 0x0010, FLASH_FREE: 0x0011, LCD_WIDTH: 0x001E,
-  LCD_HEIGHT: 0x001F, BATTERY_OK: 0x002D, AT_HOMESCREEN: 0x0037,
-  OS_BUILD: 0x0048, BOOT_BUILD: 0x0049,
+  SUB_LANGUAGE: 0x0007, DEVICE_TYPE: 0x0008, BOOT_VERSION: 0x0009, OS_MODE: 0x000A,
+  OS_VERSION: 0x000B, PHYS_RAM: 0x000C, USER_RAM: 0x000D, FREE_RAM: 0x000E,
+  PHYS_FLASH: 0x000F, USER_FLASH: 0x0010, FREE_FLASH: 0x0011, LCD_WIDTH: 0x001E,
+  LCD_HEIGHT: 0x001F, BATTERY_ENOUGH: 0x002D, HOMESCREEN: 0x0037, OS_BUILD: 0x0048,
+  BOOT_BUILD: 0x0049,
 });
 
-/** Parameters read by info(), in one request. 0x0003 (the calculator's unique id) is deliberately not read. */
-export const INFO_PARAMS = Object.freeze([
-  0x0001, 0x0002, 0x0004, 0x0006, 0x0007, 0x0008, 0x0009, 0x000A, 0x000B, 0x0048, 0x0049,
-  0x000C, 0x000D, 0x000E, 0x000F, 0x0010, 0x0011, 0x001E, 0x001F, 0x002D, 0x0037,
-]);
+// The ids OS 5.3 and 5.8 have been observed answering. libticalcs' get_version
+// also asks for 0x0003, the calculator's unique id, which a web page has no use
+// for, and five display and capability ids no 5.8 unit has been asked for (5.3
+// answered three and refused two). It does not ask for 0x0037, the home-screen flag.
+const INFO_PARAMS = [
+  PARAM.PRODUCT_NUMBER, PARAM.PRODUCT_NAME, PARAM.HW_VERSION, PARAM.LANGUAGE, PARAM.SUB_LANGUAGE,
+  PARAM.DEVICE_TYPE, PARAM.BOOT_VERSION, PARAM.OS_MODE, PARAM.OS_VERSION, PARAM.OS_BUILD,
+  PARAM.BOOT_BUILD, PARAM.PHYS_RAM, PARAM.USER_RAM, PARAM.FREE_RAM, PARAM.PHYS_FLASH,
+  PARAM.USER_FLASH, PARAM.FREE_FLASH, PARAM.LCD_WIDTH, PARAM.LCD_HEIGHT, PARAM.BATTERY_ENOUGH,
+  PARAM.HOMESCREEN,
+];
 
-/** Every byte this library had to assume. Change them per link: `link.quirks.x = ...`.
- *  CONFIRMED_ON_5_3 below holds the values the first hardware pass used. */
-export const DEFAULT_QUIRKS = Object.freeze({
-  requestBufferSize: 1024,            // what we offer in the Buffer Size Request
-  allocIncludesHeader: true,          // subtract the 5-byte raw header from the allocation (see README)
-  maxDataBytes: 1018,                 // the CE's ceiling on data bytes per raw packet, whatever it allocates
-  delayCapMicros: 400000,             // longest 0xBB00 delay honoured, in microseconds
-  modeId: [0x00, 0x03, 0x00, 0x01, 0x00, 0x00], // "normal operation" mode
-  pingValue: 0x000007D0,              // the 4-byte value after the mode id
-  // The type word is F0 <owner> 00 <type id>; the owner byte depends on the command.
-  typePrefixes: { send: 0xF00F0000, receive: 0xF0070000, delete: 0xF00B0000 },
-  learnTypePrefix: false,             // true: every command reuses the prefix list() saw for that type
-  rtsAttributes: [0x0002, 0x0003, 0x0008], // attributes Request to Send carries: type, archived, version
-  receiveAttributes: [0x0003, 0x0008, 0x0001], // attributes Request Variable asks for: archived, version, size
-  negotiateEachOperation: true,       // buffer size + ping before every operation (false: once per connection)
-  settleMs: 50,                       // pause after a send before the next operation starts
-  readOnePacket: false,               // true: every USB read asks for exactly one 64-byte packet
-  zeroLengthAfterFinal: true,         // a zero-length write after a final raw packet whose wire length is a multiple of 64
-  emptyFinalOnBoundary: false,        // true: an exactly-full virtual packet ends with an empty type 4 (hung a real CE on a one-packet message)
-  // Flash applications (sendApp / receiveApp / deleteApp).
-  appSendTypeWord: 0xF00F0024,        // Request to Send attribute 0x0002 for an application
-  appReceiveTypeWord: 0xF00F0024,     // Request Variable attribute 0x0011 for an application
-  appReceiveAttributes: [0x0003, 0x0008], // what receiveApp asks back: archived, version
-  appBatteryCheck: true,              // read parameter 0x002D before an application send; refuse if it says 0
-  appBatteryDetail: false,            // also read 0x002E (battery level) and 0x002F (external power) for the message
-});
+const REQUEST_SIZE = 1024;
+const MAX_RAW_DATA = 1023;
+const CE_MAX_DATA = 1018;
+const RAW_HEADER = 5;
+const VPKT_HEADER = 6;
+const USB_PACKET = 64;
+const DELAY_CAP_US = 400000;
+const MODE_NORMAL = [0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x07, 0xD0]; // { 3, 1, 0, 0, 0x07D0 }
+const SILENT = 0x01;
+const IGNORE_PROTECTION = 0x01;
+const SETTLE_MS = 50;
+const CE_PRODUCT_NUMBER = 0x13; // libticalcs gives a received application its model's product number
+// A type attribute is F0, an owner byte, 00, the type. libticalcs uses 0x0F on
+// the CE, except 0x07 to request a variable and 0x0B to delete one.
+const CE_OWNER = 0x0F;
+const REQUEST_OWNER = 0x07;
+const DELETE_OWNER = 0x0B;
 
-/** The CE's bulk endpoints move 64-byte USB packets. A bulk OUT transfer only ends,
- *  on the calculator's side, at a short packet, so a raw packet whose wire length
- *  is a multiple of this needs a zero-length write after it. */
-export const USB_PACKET = 64;
-
-/**
- * The command bytes that worked on the first hardware pass (one TI-84 Plus CE, OS
- * 5.3.0.0037), before the libticalcs comparison changed the defaults. Apply them with
- * `Object.assign(link.quirks, cloneQuirks(CONFIRMED_ON_5_3))` to go back to exactly those bytes.
- */
-export const CONFIRMED_ON_5_3 = Object.freeze({
-  typePrefixes: Object.freeze({ send: 0xF0070000, receive: 0xF0070000, delete: 0xF0070000 }),
-  learnTypePrefix: true,
-  rtsAttributes: Object.freeze([0x0001, 0x0002, 0x0003]),
-  receiveAttributes: Object.freeze([0x0001, 0x0002, 0x0003]),
-});
-
-/** A fresh, mutable copy of a quirks object. */
-export function cloneQuirks(q = DEFAULT_QUIRKS) {
-  const out = {};
-  for (const [k, v] of Object.entries(q)) out[k] = Array.isArray(v) ? [...v] : v && typeof v === 'object' ? { ...v } : v;
-  return out;
-}
-
-const FATAL = new Set(['TIMEOUT', 'USB_ERROR', 'DISCONNECTED', 'PROTOCOL']);
-/** The ways a link goes quiet when the calculator reboots underneath it. */
-const LINK_DROP = new Set(['TIMEOUT', 'USB_ERROR', 'DISCONNECTED']);
+const TIMEOUT_MS = 3000;
+const STREAM_TIMEOUT_MS = 15000;
+const APP_TIMEOUT_MS = 30000;
+const CLEAR_HALT_MS = 500;
+// Leftover packets ready() acknowledges or skips before the buffer answer.
+const MAX_STALE_PACKETS = 8;
 
 export class CELinkError extends Error {
-  constructor(code, message, extra = {}) {
-    super(message);
+  constructor(code, message, { cause, ...details } = {}) {
+    super(message, { cause });
     this.name = 'CELinkError';
     this.code = code;
-    Object.assign(this, extra);
+    Object.assign(this, details);
   }
 }
 
-// ------------------------------------------------------------------ bytes
+// libticalcs keeps its handle open after these. Here the link closes: a WebUSB
+// transfer that timed out cannot be cancelled and would swallow the next reply,
+// and after a reply out of protocol the calculator may still be partway through
+// an exchange whose remaining packets nothing would drain.
+export const LINK_LOST = Object.freeze(['TIMEOUT', 'USB_ERROR', 'DISCONNECTED', 'PROTOCOL']);
+// How a calculator restarting under the link looks from here.
+const LINK_DROPS = ['TIMEOUT', 'USB_ERROR', 'DISCONNECTED'];
 
-export function u16(n) { return [(n >>> 8) & 0xFF, n & 0xFF]; }
-export function u32(n) { return [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF]; }
-function rd16(b, o) { return (b[o] << 8) | b[o + 1]; }
-function rd32(b, o) { return ((b[o] << 24) >>> 0) + ((b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]); }
-function rdUint(b) { let n = 0; for (const x of b) n = n * 256 + x; return n; }
+/** The calculator's error codes (0xEE00 packets), in libticalcs' words, its guesses marked. */
+export const CALC_ERRORS = Object.freeze({
+  0x0004: 'invalid argument or name',
+  0x0006: 'cannot delete var/app from archive',
+  0x0008: 'transmission error',
+  0x0009: 'using basic mode while being in boot mode',
+  0x000C: 'out of memory',
+  0x000D: 'invalid name',
+  0x000E: 'invalid name',
+  0x0011: 'busy?',
+  0x0012: 'can\'t overwrite, variable is locked',
+  0x001B: 'variable too large',
+  0x001C: 'mode token too small',
+  0x001D: 'mode token too large',
+  0x0021: 'wrong size for parameter',
+  0x0022: 'invalid parameter ID',
+  0x0023: 'read-only parameter',
+  0x0027: 'wrong modify request?',
+  0x0029: 'remote control?',
+  0x002B: 'battery low',
+  0x002C: 'FLASH application rejected (e.g. TI-68k FL_addCert 6)',
+  0x002D: 'FLASH application rejected (e.g. TI-68k FL_addCert 7)',
+  0x002E: 'FLASH application rejected (signature does not match)',
+  0x002F: 'FLASH application rejected (e.g. TI-68k FL_addCert 9)',
+  0x0030: 'FLASH application rejected (e.g. TI-68k FL_addCert A)',
+  0x0034: 'hand-held is busy (set your calculator to HOME screen)',
+});
 
-/** Concatenate numbers, arrays of numbers and Uint8Arrays into one Uint8Array. */
-export function bytes(...parts) {
-  let len = 0;
-  for (const p of parts) len += typeof p === 'number' ? 1 : p.length;
-  const out = new Uint8Array(len);
+const protocolError = message => new CELinkError('PROTOCOL', message);
+
+function calcError(data, op, step) {
+  if (data.length < 2) return protocolError('An error packet from the calculator was shorter than its 2-byte code.');
+  const code = readBe16(data, 0);
+  const meaning = CALC_ERRORS[code];
+  return new CELinkError('CALC_ERROR',
+    `The calculator refused the request (error ${formatCode(code)}${meaning ? `: ${meaning}` : ', not a known code'}).`,
+    { calcError: code, op, step });
+}
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+function be16(n) { return [(n >>> 8) & 0xFF, n & 0xFF]; }
+function be32(n) { return [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF]; }
+function readBe16(b, o) { return (b[o] << 8) | b[o + 1]; }
+function readBe32(b, o) { return ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0; }
+function uint(b) { return b.reduce((n, x) => n * 256 + x, 0); }
+
+/** A calculator error code or packet type as it is written: 0x000C. */
+export function formatCode(n) { return `0x${n.toString(16).toUpperCase().padStart(4, '0')}`; }
+
+/** Numbers, arrays of numbers and Uint8Arrays, joined into one Uint8Array. */
+function concat(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + (typeof p === 'number' ? 1 : p.length), 0));
   let o = 0;
   for (const p of parts) {
     if (typeof p === 'number') out[o++] = p;
-    else { out.set(p, o); o += p.length; }
+    else {
+      out.set(p, o);
+      o += p.length;
+    }
   }
   return out;
 }
 
-export function hex(b) {
-  return Array.from(b, x => x.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+/** Reads fields in order from a packet body; running past the end is a PROTOCOL error. */
+function reader(d, what) {
+  let p = 0;
+  const take = n => {
+    if (p + n > d.length) throw protocolError(`${what} from the calculator was cut short.`);
+    p += n;
+    return d.subarray(p - n, p);
+  };
+  return { take, u8: () => take(1)[0], u16: () => readBe16(take(2), 0) };
 }
 
-const utf8 = new TextEncoder();
-const utf8d = new TextDecoder();
-
-// ------------------------------------------------------------------ framing
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 export function encodeRaw(type, data = []) {
-  return bytes(u32(data.length), type, data);
+  return concat(be32(data.length), type, data);
 }
 
-/** Parse one complete raw packet. Returns null if `b` does not yet hold one. */
+/** The first complete raw packet in `b`, or null when `b` does not hold one yet. */
 export function decodeRaw(b) {
-  if (b.length < 5) return null;
-  const len = rd32(b, 0);
-  if (b.length < 5 + len) return null;
-  return { type: b[4], data: b.slice(5, 5 + len), length: 5 + len };
+  if (b.length < RAW_HEADER) return null;
+  const size = readBe32(b, 0);
+  if (b.length < RAW_HEADER + size) return null;
+  return { type: b[4], data: b.slice(RAW_HEADER, RAW_HEADER + size), length: RAW_HEADER + size };
 }
 
-export function encodeVirtual(vtype, data = []) {
-  return bytes(u32(data.length), u16(vtype), data);
+export function encodeVirtual(type, data = []) {
+  return concat(be32(data.length), be16(type), data);
+}
+
+// Contents that exactly fill several raw packets end on the full last packet
+// (2030 bytes observed on hardware). libticalcs sends an empty type 4 after it,
+// which has never been tried on a CE.
+function rawPacketAt(v, offset, size) {
+  const last = v.length - offset <= size;
+  return { type: last ? RAW.DATA_LAST : RAW.DATA, data: v.subarray(offset, last ? v.length : offset + size) };
+}
+
+// For the CE a bulk OUT transfer ends only at a short USB packet, so a final
+// raw packet that fills whole packets needs a zero-length write after it
+// (libticalcs' workaround_send; the round trip with it was observed on hardware).
+export function needsZeroLength(dataLength) {
+  return (dataLength + RAW_HEADER) % USB_PACKET === 0;
+}
+
+/** The data of raw packets of type 3 and 4, back into { type, data }. */
+export function joinVirtual(chunks) {
+  if (chunks[0].length < VPKT_HEADER) throw protocolError('A virtual packet from the calculator began with a raw packet shorter than its 6-byte header.');
+  const all = concat(...chunks);
+  const size = readBe32(all, 0);
+  if (size !== all.length - VPKT_HEADER) {
+    throw protocolError(`A virtual packet from the calculator declared ${size} bytes but carried ${all.length - VPKT_HEADER}.`);
+  }
+  return { type: readBe16(all, 4), data: all.slice(VPKT_HEADER) };
+}
+
+/** An empty folder, then the name, NUL-terminated. */
+function nameField(name) {
+  const wire = encoder.encode(name);
+  return concat(0x00, wire.length, wire, 0x00);
+}
+function attribute(id, data) { return concat(be16(id), be16(data.length), data); }
+function typeWord(owner, type) { return [0xF0, owner, 0x00, type]; }
+
+const DIR_REQUEST = concat(be32(3), be16(ATTR.SIZE), be16(ATTR.TYPE), be16(ATTR.ARCHIVED), [0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x01]);
+
+function paramRequest(ids) {
+  return concat(be16(ids.length), ...ids.map(be16));
+}
+
+function varRequest(name, type, owner, attributes) {
+  return concat(nameField(name), [0x01, 0xFF, 0xFF, 0xFF, 0xFF], be16(attributes.length), ...attributes.map(be16),
+    be16(1), attribute(ATTR.DATATYPE, typeWord(owner, type)), [0x00, 0x00]);
+}
+
+/** Modify Variable with no destination: a delete. */
+function deleteRequest(name, type) {
+  return concat(nameField(name), be16(1), attribute(ATTR.DATATYPE, typeWord(DELETE_OWNER, type)),
+    IGNORE_PROTECTION, 0x00, 0x00, be16(0));
 }
 
 /**
- * The next raw packet of an encoded virtual packet, starting at `off`, with at
- * most `bufferSize` data bytes. With `emptyFinal`, a virtual packet whose bytes
- * exactly fill its last raw packet sends that packet as type 3 and then an empty
- * type 4, instead of making the full packet the type 4.
+ * Parameter Data (0x0008): { params: Map<id, value>, declared, truncated }.
+ * Parameters the calculator refused are absent. A reply cut short keeps the
+ * parameters that arrived whole. libticalcs refuses a reply whose count is
+ * not the count asked for.
  */
-export function nextChunk(vbytes, off, bufferSize, emptyFinal = false) {
-  const left = vbytes.length - off;
-  if (left > bufferSize || (left === bufferSize && emptyFinal)) {
-    return { type: RAW.DATA, data: vbytes.subarray(off, off + bufferSize) };
-  }
-  return { type: RAW.DATA_FINAL, data: vbytes.subarray(off) };
-}
-
-/** Split an encoded virtual packet into raw packets of at most `bufferSize` data bytes. */
-export function splitVirtual(vbytes, bufferSize, { emptyFinal = false } = {}) {
-  const out = [];
-  for (let off = 0; ;) {
-    const c = nextChunk(vbytes, off, bufferSize, emptyFinal);
-    out.push(c);
-    off += c.data.length;
-    if (c.type === RAW.DATA_FINAL) return out;
-  }
-}
-
-/** True when a raw packet of `dataLength` data bytes fills whole 64-byte USB packets. */
-export function needsZeroLength(dataLength) {
-  return (dataLength + 5) % USB_PACKET === 0;
-}
-
-/** Join the data of raw type 3/4 packets back into { type, data }. */
-export function joinVirtual(chunks) {
-  const all = bytes(...chunks);
-  if (all.length < 6) throw new CELinkError('PROTOCOL', 'A virtual packet from the calculator was shorter than its 6-byte header.');
-  const len = rd32(all, 0);
-  if (len !== all.length - 6) {
-    throw new CELinkError('PROTOCOL', `A virtual packet from the calculator said it held ${len} bytes but carried ${all.length - 6}.`);
-  }
-  return { type: rd16(all, 4), data: all.slice(6) };
-}
-
-// ------------------------------------------------------------------ packet bodies
-
-function attrOut(id, data) { return bytes(u16(id), u16(data.length), data); }
-
-/** Parse a Variable Header (0x000A): name, one unknown byte, attributes with a valid flag. */
-export function parseVarHeader(d) {
-  let p = 0;
-  const need = n => { if (p + n > d.length) throw new CELinkError('PROTOCOL', 'A Variable Header from the calculator was cut short.'); };
-  need(2); const nlen = rd16(d, p); p += 2;
-  need(nlen); const nameBytes = d.slice(p, p + nlen); p += nlen;
-  need(3); p += 1; const count = rd16(d, p); p += 2;
-  const attrs = new Map();
-  for (let i = 0; i < count; i++) {
-    need(3); const id = rd16(d, p); const vv = d[p + 2]; p += 3;
-    if (vv !== 0) continue;
-    need(2); const len = rd16(d, p); p += 2;
-    need(len); attrs.set(id, d.slice(p, p + len)); p += len;
-  }
-  return { nameBytes, name: utf8d.decode(nameBytes), attrs };
-}
-
-/** Parse Parameter Data (0x0008) into Map<id, Uint8Array>; invalid parameters are left out. */
-export function parseParamData(d) {
-  const out = new Map();
-  if (d.length < 2) return out;
-  const count = rd16(d, 0);
+export function parseParams(d) {
+  const params = new Map();
+  const declared = d.length >= 2 ? readBe16(d, 0) : 0;
   let p = 2;
-  for (let i = 0; i < count && p + 3 <= d.length; i++) {
-    const id = rd16(d, p); const vv = d[p + 2]; p += 3;
-    if (vv !== 0) continue;
-    if (p + 2 > d.length) break;
-    const len = rd16(d, p); p += 2;
-    if (p + len > d.length) break;
-    out.set(id, d.slice(p, p + len)); p += len;
+  for (let i = 0; i < declared; i++) {
+    if (p + 3 > d.length) return { params, declared, truncated: true };
+    const id = readBe16(d, p);
+    const valid = d[p + 2] === 0;
+    p += 3;
+    if (!valid) continue;
+    if (p + 2 > d.length) return { params, declared, truncated: true };
+    const length = readBe16(d, p);
+    p += 2;
+    if (p + length > d.length) return { params, declared, truncated: true };
+    params.set(id, d.slice(p, p + length));
+    p += length;
   }
-  return out;
+  return { params, declared, truncated: d.length < 2 };
 }
 
-/** major.minor.micro from bytes 1, 2 and 3 of the 4-byte version (byte 0 is not
- *  part of it), plus the build number when its parameter is exactly 2 bytes. */
-export function formatVersion(v, build) {
-  if (!v || v.length !== 4) return undefined;
-  let s = `${v[1]}.${v[2]}.${v[3]}`;
-  if (build && build.length === 2) s += '.' + String(rd16(build, 0)).padStart(4, '0');
-  return s;
+/** Variable Header (0x000A): { name, attrs: Map<id, value> }; invalid attributes are absent. */
+function parseVarHeader(d) {
+  const r = reader(d, 'A Variable Header');
+  const folderLength = r.u8();
+  if (folderLength) r.take(folderLength + 1);
+  const nameLength = r.u8();
+  const name = nameLength ? decoder.decode(r.take(nameLength + 1).subarray(0, nameLength)) : '';
+  const attrs = new Map();
+  for (let n = r.u16(); n > 0; n--) {
+    const id = r.u16();
+    if (r.u8() === 0) attrs.set(id, r.take(r.u16()).slice());
+  }
+  return { name, attrs };
 }
 
-export function infoFromParams(raw) {
-  const info = {};
-  const num = id => (raw.has(id) ? rdUint(raw.get(id)) : undefined);
-  const set = (k, v) => { if (v !== undefined) info[k] = v; };
-  if (raw.has(0x0002)) info.productName = utf8d.decode(raw.get(0x0002)).replace(/\0+$/, '');
-  // The product number is the last byte of parameter 0x0001 (0x13 on the CE).
-  if (raw.has(0x0001) && raw.get(0x0001).length) info.productNumber = raw.get(0x0001).at(-1);
-  set('osVersion', formatVersion(raw.get(0x000B), raw.get(0x0048)));
-  set('bootVersion', formatVersion(raw.get(0x0009), raw.get(0x0049)));
-  set('hardwareVersion', num(0x0004));
-  set('ramFree', num(0x000E));
-  set('archiveFree', num(0x0011));
-  set('language', num(0x0006));
-  set('subLanguage', num(0x0007));
-  if (raw.has(0x0037)) info.atHomescreen = num(0x0037) !== 0;
-  if (raw.has(0x002D)) info.batteryOk = num(0x002D) !== 0;
-  set('lcdWidth', num(0x001E));
-  set('lcdHeight', num(0x001F));
+// A parameter or attribute is used only at its expected size, as libticalcs
+// uses parameters.
+function sized(values, id, size) {
+  const v = values.get(id);
+  return v?.length === size ? v : undefined;
+}
+function flagOf(values, id) {
+  const v = sized(values, id, 1);
+  return v && v[0] !== 0;
+}
+function numberOf(values, id, size) {
+  const v = sized(values, id, size);
+  return v && uint(v);
+}
+
+/** The parameters info() reads, decoded. `params` keeps every value as it came. */
+export function infoFromParams(params) {
+  const name = params.get(PARAM.PRODUCT_NAME);
+  const fields = {
+    productName: name && decoder.decode(name.subarray(0, name.includes(0) ? name.indexOf(0) : name.length)),
+    productNumber: sized(params, PARAM.PRODUCT_NUMBER, 4)?.[3],
+    osVersion: versionString(params.get(PARAM.OS_VERSION), sized(params, PARAM.OS_BUILD, 2)),
+    bootVersion: versionString(params.get(PARAM.BOOT_VERSION), sized(params, PARAM.BOOT_BUILD, 2)),
+    hardwareVersion: numberOf(params, PARAM.HW_VERSION, 2),
+    language: numberOf(params, PARAM.LANGUAGE, 1),
+    subLanguage: numberOf(params, PARAM.SUB_LANGUAGE, 1),
+    ramFree: numberOf(params, PARAM.FREE_RAM, 8),
+    archiveFree: numberOf(params, PARAM.FREE_FLASH, 8),
+    lcdWidth: numberOf(params, PARAM.LCD_WIDTH, 2),
+    lcdHeight: numberOf(params, PARAM.LCD_HEIGHT, 2),
+    batteryOk: flagOf(params, PARAM.BATTERY_ENOUGH),
+    atHomescreen: flagOf(params, PARAM.HOMESCREEN),
+  };
+  const info = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
+  info.params = params;
   return info;
 }
 
-// ------------------------------------------------------------------ the link
+// Bytes 1-3 of the version, then the build number. Without a build libticalcs
+// writes a.bb; every CE sends one, and a.b.c keeps versions comparable.
+function versionString(v, build) {
+  if (v?.length !== 4) return undefined;
+  const base = `${v[1]}.${v[2]}.${v[3]}`;
+  return build ? `${base}.${String(readBe16(build, 0)).padStart(4, '0')}` : base;
+}
+
+// Attributes are read by id. libticalcs reads them by position, which misreads
+// a row when the calculator marks one invalid.
+function listRow({ name, attrs }) {
+  const type = sized(attrs, ATTR.TYPE, 4)?.[3] ?? null;
+  return {
+    name, type, typeName: type === null ? 'unknown' : typeName(type),
+    size: numberOf(attrs, ATTR.SIZE, 4) ?? null, archived: flagOf(attrs, ATTR.ARCHIVED) ?? false,
+  };
+}
+
+function storage(attrs) {
+  return { archived: flagOf(attrs, ATTR.ARCHIVED) ?? false, version: sized(attrs, ATTR.VERSION, 4)?.[3] ?? 0 };
+}
+
+// The header's size is authoritative. Contents shorter than it are refused,
+// where libticalcs would copy past the end of what arrived.
+function trimToSize(contents, attrs) {
+  const want = numberOf(attrs, ATTR.SIZE, 4);
+  if (want === undefined) return contents;
+  if (contents.length < want) throw protocolError(`The calculator declared ${want} bytes but sent ${contents.length}.`);
+  return contents.slice(0, want);
+}
+
+/** A name as typed or listed: its raw bytes, and the calculator's spelling that goes on the wire. */
+function calculatorName(name, type) {
+  if (!Number.isInteger(type) || type < 0 || type > 0xFF) throw new CELinkError('BAD_ENTRY', `Unknown variable type ${type}.`);
+  const nameBytes = nameToBytes(name, type);
+  return { nameBytes, spelled: nameToString(nameBytes, type) };
+}
+
+function spelledName(entry) {
+  return entry.nameBytes ? nameToString(entry.nameBytes, entry.type) : calculatorName(entry.name, entry.type).spelled;
+}
+
+/** onProgress(contents bytes sent, size), from the bytes of the virtual packet written so far. */
+function contentsProgress(onProgress, size) {
+  return written => onProgress?.(Math.min(size, Math.max(0, written - VPKT_HEADER)), size);
+}
+
+function vpktName(type) {
+  return Object.keys(VPKT).find(k => VPKT[k] === type) ?? formatCode(type);
+}
+
+// What the link tolerates that libticalcs does not, each counted in
+// link.anomalies. Whether a CE ever causes the first three is not known:
+//   stalePacket    a leftover data or acknowledgement packet before ready()'s
+//                  buffer answer, acknowledged or skipped (libticalcs fails)
+//   listingAck     a data acknowledgement inside a directory listing, skipped
+//                  (libticalcs fails)
+//   shortParams    a Parameter Data reply with fewer parameters than asked
+//                  for, or cut short (libticalcs fails)
+//   haltsCleared   both endpoints cleared before closing on a lost link
+//                  (libticalcs never clears a halt after an error)
+export const ANOMALIES = Object.freeze(['stalePacket', 'listingAck', 'shortParams', 'haltsCleared']);
 
 export class CELink {
-  /** Ask the browser to let the user pick a calculator. */
-  static async request({ usb = globalThis.navigator?.usb } = {}) {
+  /** Ask the browser to let the user pick a calculator; `options` are fromDevice's. */
+  static async request({ usb = globalThis.navigator?.usb, ...options } = {}) {
     if (!usb) throw new CELinkError('NO_WEBUSB', 'This browser cannot talk to USB devices. Use Chrome or Edge on a computer.');
     let device;
     try {
@@ -300,782 +387,440 @@ export class CELink {
       if (e?.name === 'NotFoundError') throw new CELinkError('NO_DEVICE_SELECTED', 'No calculator was chosen.');
       throw new CELinkError('USB_ERROR', `The browser could not show the device list: ${e?.message ?? e}`);
     }
-    return new CELink(device);
+    return CELink.fromDevice(device, options);
   }
 
-  /** Wrap a device the user already granted (from usb.getDevices()). */
-  static fromDevice(device) { return new CELink(device); }
-
-  /** Devices from TI this page was already allowed to use. */
+  /** TI devices this page was already allowed to use. */
   static async granted({ usb = globalThis.navigator?.usb } = {}) {
     if (!usb) return [];
     return (await usb.getDevices()).filter(d => d.vendorId === TI_VENDOR_ID);
   }
 
-  constructor(device) {
-    if (!device) throw new CELinkError('NO_DEVICE', 'No USB device was given.');
-    this.device = device;
-    this.quirks = cloneQuirks();
-    this.timeout = 3000;        // ms per USB transfer
-    this.streamTimeout = 15000; // ms per transfer while variable data streams (archive writes are slow)
-    this.appTimeout = 30000;    // ms per transfer while an application streams and for the answers around it
-    this.lastBattery = null;    // what the last battery check read
-    this.capture = false;
-    this.captureLog = [];
-    this.captureOps = [];
-    this.bufferSize = null;     // data bytes per raw packet, after the header rule
-    this.allocation = null;     // the calculator's raw answer to the Buffer Size Request
-    this.opened = false;
-    this._poisoned = null;      // a reason set when the link is closed for good (e.g. a reboot on landing)
-    this.lastModeAck = null;
-    this.lastDelayMs = null;    // the last 0xBB00 wait, for diagnostics
-    this._rx = new Uint8Array(0);
-    this._lock = Promise.resolve();
-    this._prefixes = new Map();
-    this._t0 = null;
+  /**
+   * A link over a USBDevice. Timeouts are per USB transfer: `timeout` for
+   * commands, `streamTimeout` for variable contents, which the calculator may
+   * take a while to archive, and `appTimeout` for a Flash application, which it
+   * erases and writes before each acknowledgement. They are longer than
+   * libticables' 1.5 s because here a timeout closes the link (see LINK_LOST).
+   */
+  static fromDevice(device, options) {
+    return new CELink(device, options);
   }
 
-  get productId() { return this.device.productId; }
+  opened = false;
+  /** Called with ('out' | 'in', bytes) for every raw packet and zero-length write. */
+  onPacket = null;
+  /**
+   * Counts of what the link let pass where libticalcs would fail, and of the
+   * halt clearing it does before closing on a lost link (see ANOMALIES).
+   * `onAnomaly(kind, detail)` is called for each one as it happens.
+   */
+  anomalies = Object.fromEntries(ANOMALIES.map(k => [k, 0]));
+  onAnomaly = null;
 
-  // -------------------------------------------------------------- open / close
+  #timeout;
+  #streamTimeout;
+  #appTimeout;
+  #in = null;
+  #out = null;
+  #rx = new Uint8Array(0);
+  #bufferSize = null;
+  #queue = Promise.resolve();
+  #op = null;
+  #closedReason = null;
 
+  constructor(device, { timeout = TIMEOUT_MS, streamTimeout = STREAM_TIMEOUT_MS, appTimeout = APP_TIMEOUT_MS } = {}) {
+    if (!device) throw new CELinkError('NO_DEVICE', 'No USB device was given.');
+    this.device = device;
+    this.#timeout = timeout;
+    this.#streamTimeout = streamTimeout;
+    this.#appTimeout = appTimeout;
+  }
+
+  /** Data bytes per raw packet under the negotiated allocation; null until ready. */
+  get bufferSize() { return this.#bufferSize; }
+
+  /**
+   * Claim interface 0 of configuration 1; call ready() before the first
+   * operation. Throws OPEN_FAILED with `step` (open, config, claim) and the
+   * WebUSB error as `cause` when WebUSB refuses, leaving the link closed.
+   */
   async open() {
     const d = this.device;
-    // Which WebUSB call refused, and the DOMException name it refused with,
-    // ride on OPEN_FAILED as `step` and `cause`: fixed words a page can bucket
-    // (a policy block, a held interface, a busy device) without the message.
     let step = 'open';
     try {
       if (!d.opened) await d.open();
-      const pick = findBulkInterface(d);
-      if (!pick) throw new CELinkError('NO_ENDPOINTS', 'This USB device does not look like a TI-84 Plus CE (no bulk IN/OUT endpoints were found).');
       step = 'config';
-      if (d.configuration?.configurationValue !== pick.configurationValue) await d.selectConfiguration(pick.configurationValue);
+      if (d.configuration?.configurationValue !== 1) await d.selectConfiguration(1);
       step = 'claim';
-      await d.claimInterface(pick.interfaceNumber);
-      step = 'alt';
-      if (pick.alternateSetting !== 0) await d.selectAlternateInterface(pick.interfaceNumber, pick.alternateSetting);
-      this._iface = pick.interfaceNumber;
-      this.epIn = pick.epIn;
-      this.epOut = pick.epOut;
-      this.opened = true;
-      this._session = false;
-      this._poisoned = null;
-      this._rx = new Uint8Array(0);
+      await d.claimInterface(0);
     } catch (e) {
       await this.close();
-      if (e instanceof CELinkError) throw e;
-      throw new CELinkError('OPEN_FAILED',
-        `Could not open the calculator: ${e?.message ?? e}. If TI Connect CE or another program is running, close it, unplug the calculator, plug it back in and try again.`,
-        {step, cause: typeof e?.name === 'string' ? e.name : ''});
+      throw new CELinkError('OPEN_FAILED', `Could not open the calculator (${step}): ${e?.message ?? e}`, { step, cause: e });
     }
+    const endpoints = d.configuration.interfaces.find(i => i.interfaceNumber === 0)
+      ?.alternates.find(a => a.alternateSetting === 0)?.endpoints ?? [];
+    this.#in = endpoints.find(e => e.type === 'bulk' && e.direction === 'in');
+    this.#out = endpoints.find(e => e.type === 'bulk' && e.direction === 'out');
+    if (!this.#in || !this.#out) {
+      await this.close();
+      throw new CELinkError('NO_ENDPOINTS', 'This USB device does not look like a TI-84 Plus CE (no bulk IN/OUT endpoints were found).');
+    }
+    this.opened = true;
+    this.#closedReason = null;
+    this.#rx = new Uint8Array(0);
     return this;
   }
 
   async close() {
-    const wasOpen = this.opened;
     this.opened = false;
-    this.bufferSize = null;
-    this._session = false;
-    this._sentAt = null;
-    if (this._iface != null) {
-      try { await this.device.releaseInterface(this._iface); } catch { /* already gone */ }
-      this._iface = null;
-    }
-    try { if (this.device.opened || wasOpen) await this.device.close(); } catch { /* already gone */ }
+    this.#bufferSize = null;
+    try { await this.device.releaseInterface(0); } catch { /* not claimed, or already gone */ }
+    try { if (this.device.opened) await this.device.close(); } catch { /* already gone */ }
   }
 
-  // -------------------------------------------------------------- public operations
+  /**
+   * libticalcs' is_ready: negotiate the raw packet size, then set the normal
+   * mode. Operations never run it themselves.
+   */
+  ready() {
+    return this.#run('ready', async () => {
+      await this.#writeRaw(RAW.BUF_REQ, be32(REQUEST_SIZE));
+      for (let stale = 0; ; stale++) {
+        const r = await this.#readRaw();
+        if (r.type === RAW.BUF_ALLOC && r.data.length === 4) {
+          this.#allocate(readBe32(r.data, 0));
+          break;
+        }
+        const leftover = r.type === RAW.DATA || r.type === RAW.DATA_LAST || r.type === RAW.ACK;
+        if (!leftover || stale === MAX_STALE_PACKETS) {
+          throw protocolError(`Expected a buffer size allocation from the calculator, got raw packet type ${r.type}.`);
+        }
+        if (r.type !== RAW.ACK) await this.#writeRaw(RAW.ACK, [0xE0, 0x00]);
+        this.#anomaly('stalePacket', `raw packet type ${r.type} before the buffer size allocation`);
+      }
+      await this.#sendVirtual(VPKT.PING, MODE_NORMAL);
+      await this.#expect([VPKT.MODE_ACK], 'mode');
+    });
+  }
 
+  /** Model, versions and free memory; see infoFromParams. */
   info() {
-    return this._op('info', async () => {
-      await this._begin();
-      await this._sendVirtual(VPKT.PARAM_REQ, bytes(u16(INFO_PARAMS.length), ...INFO_PARAMS.map(u16)));
-      const v = await this._expect([VPKT.PARAM_DATA]);
-      const raw = parseParamData(v.data);
-      const info = infoFromParams(raw);
+    return this.#run('info', async () => {
+      await this.#sendVirtual(VPKT.PARAM_REQ, paramRequest(INFO_PARAMS));
+      const reply = await this.#expect([VPKT.PARAM_DATA], 'params');
+      const { params, declared, truncated } = parseParams(reply.data);
+      if (declared !== INFO_PARAMS.length || truncated) {
+        this.#anomaly('shortParams', `${declared} of ${INFO_PARAMS.length} parameters declared${truncated ? ', reply cut short' : ''}`);
+      }
+      const info = infoFromParams(params);
+      // Without parameter 0x0002 the model is the name the USB device gives.
       if (info.productName === undefined && this.device.productName) info.productName = this.device.productName;
-      info.productId = this.device.productId;
-      info.raw = raw;
       return info;
     });
   }
 
+  /** Every variable and application: [{ name, type, typeName, size, archived }]. */
   list() {
-    return this._op('list', async () => {
-      await this._begin();
-      const ids = [ATTR.SIZE, ATTR.TYPE, ATTR.ARCHIVED];
-      await this._sendVirtual(VPKT.DIR_REQ, bytes(u32(ids.length), ...ids.map(u16), [0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x01]));
+    return this.#run('list', async () => {
+      await this.#sendVirtual(VPKT.DIR_REQ, DIR_REQUEST);
       const rows = [];
       for (;;) {
-        const v = await this._expect([VPKT.VAR_HDR, VPKT.EOT, VPKT.DATA_ACK]);
-        if (v.type === VPKT.EOT) break;
-        if (v.type === VPKT.DATA_ACK) continue;
-        const h = parseVarHeader(v.data);
-        const t = h.attrs.get(ATTR.TYPE);
-        const typeRaw = t && t.length === 4 ? rd32(t, 0) : null;
-        const type = typeRaw == null ? null : typeRaw & 0xFF;
-        if (typeRaw != null) this._prefixes.set(type, (typeRaw & 0xFFFFFF00) >>> 0);
-        const s = h.attrs.get(ATTR.SIZE);
-        const a = h.attrs.get(ATTR.ARCHIVED);
-        rows.push({
-          name: h.name, nameBytes: h.nameBytes, type, typeName: type == null ? 'unknown' : typeName(type),
-          size: s ? rdUint(s) : null, archived: a ? a[0] !== 0 : false, typeRaw,
-        });
-      }
-      return rows;
-    });
-  }
-
-  /** Send one variable entry (from parseFile or makeEntry). */
-  send(entry, { archive = false, onProgress, onPhase, rebootOnLanding = false } = {}) {
-    if (!entry || !(entry.data instanceof Uint8Array)) {
-      return Promise.reject(new CELinkError('BAD_ENTRY', 'send() needs a variable entry with its data (use parseFile or makeEntry).'));
-    }
-    if (entry.type === TYPE.FLASH_APP) {
-      return Promise.reject(new CELinkError('UNSUPPORTED_TYPE', 'This is a Flash application. Send it with sendApp(), the one call that writes an app to Flash.'));
-    }
-    let name;
-    try {
-      name = wireName(entry.nameBytes ? nameToString(entry.nameBytes, entry.type) : entry.name, entry.type);
-    } catch (e) { return Promise.reject(e); }
-    const size = entry.data.length;
-    return this._op(`send ${entry.name}`, async () => {
-      await this._begin();
-      const q = this.quirks;
-      const values = {
-        [ATTR.SIZE]: u32(size), [ATTR.TYPE]: u32(this._typeWord(entry.type, 'send')),
-        [ATTR.ARCHIVED]: [archive ? 1 : 0], [ATTR.VERSION]: [0, 0, 0, (entry.version ?? 0) & 0xFF],
-      };
-      const attrs = q.rtsAttributes.filter(id => values[id]);
-      // The 2-byte name length is a 1-byte folder name length (always 0 here)
-      // and a 1-byte name length; the name ends with a NUL; then the size.
-      await this._sendVirtual(VPKT.RTS, bytes(
-        u16(name.length), name, 0x00, u32(size), SILENT_SEND,
-        u16(attrs.length), ...attrs.map(id => attrOut(id, values[id])),
-      ));
-      await this._expect([VPKT.DATA_ACK]);
-      onProgress?.(0, size);
-      // Three moments around the landing: the write of the last data packet
-      // starting, the whole variable being on the wire, and the calculator
-      // acknowledging it. When rebootOnLanding is set, a link that drops from the
-      // first of those on is the expected outcome, not an error: a reboot can
-      // reject the final transferOut itself (observed on a real CE), so the point
-      // of no return is when that write starts, not when it completes.
-      let finalWriteStarted = false;
-      try {
-        await this._sendVirtual(VPKT.VAR_CNTS, entry.data, {
-          timeout: this.streamTimeout,
-          onChunk: sent => onProgress?.(Math.max(0, Math.min(size, sent - 6)), size),
-          onFinalWriteStarted: () => { finalWriteStarted = true; onPhase?.('final-write-started'); },
-          onFinalWritten: () => onPhase?.('final-written'),
-        });
-        await this._expect([VPKT.DATA_ACK], this.streamTimeout);
-        await this._sendVirtual(VPKT.EOT, []);
-        this._sentAt = performance.now(); // the calculator needs a moment to commit it
-        onPhase?.('acknowledged');
-        const result = { name: entry.name, bytes: size };
-        if (rebootOnLanding) { result.rebooted = false; result.acknowledged = true; }
-        return result;
-      } catch (e) {
-        const code = e instanceof CELinkError ? e.code : usbError(e).code;
-        // A drop from the final packet's write onward is the reboot we asked for,
-        // including a rejected transferOut. A drop before it is an ordinary
-        // failure and throws as it always did.
-        if (rebootOnLanding && finalWriteStarted && LINK_DROP.has(code)) {
-          await this._poison('The calculator rebooted as the variable landed, so the USB link is closed. Reconnect (open a new link) to keep working.');
-          return { name: entry.name, bytes: size, rebooted: true, acknowledged: false };
+        const v = await this.#expect([VPKT.VAR_HDR, VPKT.EOT, VPKT.DATA_ACK], 'dir');
+        if (v.type === VPKT.EOT) return rows;
+        if (v.type === VPKT.DATA_ACK) {
+          this.#anomaly('listingAck', 'a data acknowledgement inside the listing');
+          continue;
         }
-        throw e;
+        rows.push(listRow(parseVarHeader(v.data)));
       }
     });
   }
 
-  /** Send every entry of a .8xp/.8xv/.8xg file, one after another. */
-  async sendFile(file, { archive = false, onProgress, onPhase, rebootOnLanding = false } = {}) {
-    const parsed = file instanceof Uint8Array || file instanceof ArrayBuffer ? parseFile(file) : file;
-    // rebootOnLanding only makes sense for a single variable: with several, the
-    // link would drop mid-file and the rest could not be sent.
-    if (rebootOnLanding && parsed.entries.length !== 1) {
-      throw new CELinkError('BAD_ENTRY', 'rebootOnLanding needs a file with exactly one variable; this file has ' + parsed.entries.length + '.');
+  /**
+   * Send a variable entry (from parseFile or makeEntry), silently replacing
+   * one of the same name and type. Resolves { name, bytes, rebooted }.
+   *
+   * `rebootOnLanding` is for a variable that makes the calculator restart as
+   * it lands. From the moment the write of the last contents packet starts, a
+   * dropped link is that restart, not a failure: observed on hardware, the
+   * restart can reject that very write although every USB packet was taken.
+   * The send then resolves with `rebooted: true`, and the link stays closed
+   * until the next open().
+   */
+  async send(entry, { archive = !!entry?.archived, onProgress, rebootOnLanding = false } = {}) {
+    if (!(entry?.data instanceof Uint8Array)) throw new CELinkError('BAD_ENTRY', 'send() needs a variable entry with its data (from parseFile or makeEntry).');
+    if (entry.type === TYPE.FLASH_APP) throw new CELinkError('UNSUPPORTED_TYPE', 'This is a Flash application: send it with sendApp().');
+    const size = entry.data.length;
+    const rts = concat(nameField(spelledName(entry)), be32(size), SILENT, be16(3),
+      attribute(ATTR.TYPE, typeWord(CE_OWNER, entry.type)),
+      attribute(ATTR.ARCHIVED, [archive ? 1 : 0]),
+      attribute(ATTR.VERSION, [0, 0, 0, entry.version ?? 0]));
+    return this.#run('send', async () => {
+      await this.#sendVirtual(VPKT.RTS, rts);
+      await this.#expect([VPKT.DATA_ACK], 'rts');
+      onProgress?.(0, size);
+      let landing = false;
+      try {
+        await this.#sendVirtual(VPKT.VAR_CNTS, entry.data, {
+          timeout: this.#streamTimeout,
+          onProgress: contentsProgress(onProgress, size),
+          onLastPacket: () => { landing = true; },
+        });
+        await this.#expect([VPKT.DATA_ACK], 'contents', this.#streamTimeout);
+        await this.#sendVirtual(VPKT.EOT);
+      } catch (e) {
+        if (!(rebootOnLanding && landing && LINK_DROPS.includes(e.code))) throw e;
+        await this.close();
+        this.#closedReason = 'The calculator restarted as the variable landed. Open the link again to go on.';
+        return { name: entry.name, bytes: size, rebooted: true };
+      }
+      await sleep(SETTLE_MS); // libticalcs pauses after every variable, commented "needed"
+      return { name: entry.name, bytes: size, rebooted: false };
+    });
+  }
+
+  /** Send every entry of a .8xp/.8xv/.8xg file, as parseFile returned it, in order. */
+  async sendFile(file, { onProgress, ...options } = {}) {
+    if (!Array.isArray(file?.entries)) throw new CELinkError('BAD_ENTRY', 'sendFile() needs a file as parseFile returns it.');
+    const { entries } = file;
+    if (options.rebootOnLanding && entries.length !== 1) {
+      throw new CELinkError('BAD_ENTRY', `rebootOnLanding needs a file with exactly one variable; this one has ${entries.length}.`);
     }
     const results = [];
-    for (const [i, e] of parsed.entries.entries()) {
-      results.push(await this.send(e, { archive, rebootOnLanding, onPhase, onProgress: onProgress && ((s, t) => onProgress(s, t, i, e)) }));
+    for (const [i, e] of entries.entries()) {
+      results.push(await this.send(e, { ...options, onProgress: onProgress && ((sent, total) => onProgress(sent, total, i, e)) }));
     }
     return results;
   }
 
-  /** Receive a variable. `name` is a string ("HELLO", "L1", "L₁") or the nameBytes of a list() row. */
-  receive(name, type) {
+  /** Read a variable back, as an entry buildFile can write. `name` as typed ("L1") or listed ("L₁"). */
+  async receive(name, type) {
     if (type === TYPE.FLASH_APP) return this.receiveApp(name);
-    let wire;
-    try { wire = wireName(name, type); } catch (e) { return Promise.reject(e); }
-    return this._op(`receive ${printable(name)}`, async () => {
-      await this._begin();
-      const req = this.quirks.receiveAttributes;
-      await this._sendVirtual(VPKT.VAR_REQ, bytes(
-        u16(wire.length), wire,
-        [0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF], // name NUL, then 01 FF FF FF FF
-        u16(req.length), ...req.map(u16),
-        u16(1), attrOut(ATTR.TYPE_REQ, u32(this._typeWord(type, 'receive'))),
-        [0x00, 0x00],
-      ));
-      const hv = await this._expect([VPKT.VAR_HDR]);
-      const h = parseVarHeader(hv.data);
-      const cv = await this._expect([VPKT.VAR_CNTS], this.streamTimeout);
-      // The size in the header is authoritative: anything past it is ignored,
-      // and only contents shorter than it are an error.
-      let data = cv.data;
-      const s = h.attrs.get(ATTR.SIZE);
-      if (s) {
-        const declared = rdUint(s);
-        if (data.length < declared) {
-          throw new CELinkError('PROTOCOL', `The calculator said ${h.name} is ${declared} bytes but sent only ${data.length}.`);
-        }
-        data = data.slice(0, declared);
-      }
-      const t = h.attrs.get(ATTR.TYPE);
-      const gotType = t && t.length === 4 ? t[3] : type;
-      const ver = h.attrs.get(ATTR.VERSION);
-      const a = h.attrs.get(ATTR.ARCHIVED);
-      let nameBytes;
-      try { nameBytes = nameToBytes(h.name, gotType); } catch { nameBytes = nameToBytes(h.nameBytes.slice(0, 8), gotType); }
+    const { nameBytes, spelled } = calculatorName(name, type);
+    const request = varRequest(spelled, type, REQUEST_OWNER, [ATTR.ARCHIVED, ATTR.VERSION, ATTR.SIZE]);
+    return this.#run('receive', async () => {
+      await this.#sendVirtual(VPKT.VAR_REQ, request);
+      const { attrs } = parseVarHeader((await this.#expect([VPKT.VAR_HDR], 'request')).data);
+      const contents = await this.#expect([VPKT.VAR_CNTS], 'contents', this.#streamTimeout);
+      const data = trimToSize(contents.data, attrs);
+      return { name: spelled, nameBytes, type, typeName: typeName(type), ...storage(attrs), data, size: data.length };
+    });
+  }
+
+  async delete(name, type) {
+    const { spelled } = calculatorName(name, type);
+    return this.#run('delete', async () => {
+      await this.#sendVirtual(VPKT.MODIF_VAR, deleteRequest(spelled, type));
+      await this.#expect([VPKT.DATA_ACK], 'delete');
+    });
+  }
+
+  /** Write the Flash application of a .8ek file, as parseAppFile returned it. */
+  async sendApp(file, { onProgress } = {}) {
+    const entry = file?.entries?.[0];
+    if (entry?.type !== TYPE.FLASH_APP || !entry.data?.length) throw new CELinkError('BAD_ENTRY', 'sendApp() needs a Flash application, as parseAppFile returns it.');
+    const size = entry.data.length;
+    const timeout = this.#appTimeout;
+    const rts = concat(nameField(spelledName(entry)), be32(size), SILENT, be16(2),
+      attribute(ATTR.TYPE, typeWord(CE_OWNER, TYPE.FLASH_APP)), attribute(ATTR.ARCHIVED, [1]));
+    return this.#run('sendApp', async () => {
+      await this.#sendVirtual(VPKT.RTS, rts);
+      await this.#expect([VPKT.DATA_ACK], 'rts', timeout);
+      onProgress?.(0, size);
+      await this.#sendVirtual(VPKT.VAR_CNTS, entry.data, {
+        timeout,
+        onProgress: contentsProgress(onProgress, size),
+      });
+      await this.#expect([VPKT.DATA_ACK], 'contents', timeout);
+      await this.#sendVirtual(VPKT.EOT);
+      await sleep(SETTLE_MS); // libticalcs does not pause here; no app send has run on hardware without it
+      return { name: entry.name, bytes: size };
+    });
+  }
+
+  /** Read an installed application back, as an entry buildAppFile can write. */
+  async receiveApp(name) {
+    const { nameBytes, spelled } = calculatorName(name, TYPE.FLASH_APP);
+    const request = varRequest(spelled, TYPE.FLASH_APP, CE_OWNER, [ATTR.ARCHIVED, ATTR.VERSION]);
+    return this.#run('receiveApp', async () => {
+      await this.#sendVirtual(VPKT.VAR_REQ, request);
+      const { attrs } = parseVarHeader((await this.#expect([VPKT.VAR_HDR], 'request')).data);
+      const { data } = await this.#expect([VPKT.VAR_CNTS], 'contents', this.#appTimeout);
       return {
-        name: nameToString(nameBytes, gotType), nameBytes, type: gotType, typeName: typeName(gotType),
-        version: ver && ver.length ? ver[ver.length - 1] : 0, archived: a ? a[0] !== 0 : false, data, size: data.length,
+        name: spelled, nameBytes, type: TYPE.FLASH_APP, typeName: typeName(TYPE.FLASH_APP),
+        ...storage(attrs), data, size: data.length, app: { hardwareId: CE_PRODUCT_NUMBER },
       };
     });
   }
 
-  delete(name, type) {
-    let wire;
-    try { wire = wireName(name, type); } catch (e) { return Promise.reject(e); }
-    return this._op(`delete ${printable(name)}`, async () => {
-      await this._begin();
-      // Delete is "modify variable" with an empty destination: the name and its
-      // NUL, the type, the protection mode, then a destination with no folder,
-      // no name and no attributes.
-      await this._sendVirtual(VPKT.DEL_VAR, bytes(
-        u16(wire.length), wire, 0x00,
-        u16(1), attrOut(ATTR.TYPE_REQ, u32(this._typeWord(type, 'delete'))),
-        BYPASS_PROTECTION, [0x00, 0x00, 0x00, 0x00],
-      ));
-      await this._expect([VPKT.DATA_ACK]);
-      return { name: printable(name), deleted: true };
-    });
-  }
-
-  // -------------------------------------------------------------- Flash applications
-
-  /**
-   * Send a Flash application (.8ek) to the calculator's Flash. This is the only
-   * call in the library that writes an application. `app` is the file's bytes,
-   * the result of parseFile / parseAppFile, or its entry.
-   *
-   * The sequence: buffer negotiation and the normal-mode ping; the battery
-   * check (parameter 0x002D; refused with LOW_BATTERY if it says 0); a Request
-   * to Send with the name, its NUL, the data length, the silent flag and
-   * exactly two attributes, type F0 0F 00 24 then archived 01 (no version);
-   * 0xAA00; the whole application in one Variable Contents; 0xAA00; End of
-   * Transmission, with no reply awaited. The calculator erases and writes Flash
-   * during the two waits and may ask for time with delay acknowledgements.
-   */
-  sendApp(app, { onProgress } = {}) {
-    let entry;
-    try { entry = appEntry(app); } catch (e) { return Promise.reject(e); }
-    const name = entry.nameBytes instanceof Uint8Array ? entry.nameBytes : utf8.encode(entry.name);
-    const size = entry.data.length;
-    return this._op(`send app ${printable(name)}`, async () => {
-      try {
-        await this._begin();
-        const q = this.quirks;
-        if (q.appBatteryCheck) await this._batteryCheck();
-        await this._sendVirtual(VPKT.RTS, bytes(
-          u16(name.length), name, 0x00, u32(size), SILENT_SEND,
-          u16(2), attrOut(ATTR.TYPE, u32(q.appSendTypeWord)), attrOut(ATTR.ARCHIVED, [0x01]),
-        ));
-        await this._expect([VPKT.DATA_ACK], this.appTimeout);
-        onProgress?.(0, size);
-        await this._sendVirtual(VPKT.VAR_CNTS, entry.data, {
-          timeout: this.appTimeout,
-          onChunk: sent => onProgress?.(Math.max(0, Math.min(size, sent - 6)), size),
-        });
-        await this._expect([VPKT.DATA_ACK], this.appTimeout);
-        await this._sendVirtual(VPKT.EOT, []);
-        this._sentAt = performance.now();
-        return { name: entry.name, bytes: size };
-      } catch (e) {
-        if (e?.code === 'CALC_ERROR' && APP_ERRORS[e.calcError]) {
-          throw new CELinkError('CALC_ERROR', `The calculator refused the app (error 0x${e.calcError.toString(16).padStart(4, '0')}: ${APP_ERRORS[e.calcError]}).`, { calcError: e.calcError });
-        }
-        throw e;
-      }
-    });
-  }
-
-  /** The installed Flash applications: list() rows of type 0x24. Read-only. */
+  /** The installed applications: list() rows of type 0x24. */
   async listApps() {
     return (await this.list()).filter(r => r.type === TYPE.FLASH_APP);
   }
 
-  /**
-   * Read an installed application back. The entry it returns has
-   * `app.hardwareId` set from the calculator's product number, so buildAppFile(entry)
-   * writes a .8ek file.
-   */
-  receiveApp(name) {
-    let wire;
-    try { wire = wireName(name); } catch (e) { return Promise.reject(e); }
-    return this._op(`receive app ${printable(name)}`, async () => {
-      await this._begin();
-      const q = this.quirks;
-      await this._sendVirtual(VPKT.PARAM_REQ, bytes(u16(1), u16(PARAM.PRODUCT_NUMBER)));
-      const pid = parseParamData((await this._expect([VPKT.PARAM_DATA])).data).get(PARAM.PRODUCT_NUMBER);
-      const req = q.appReceiveAttributes;
-      await this._sendVirtual(VPKT.VAR_REQ, bytes(
-        u16(wire.length), wire,
-        [0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF],
-        u16(req.length), ...req.map(u16),
-        u16(1), attrOut(ATTR.TYPE_REQ, u32(q.appReceiveTypeWord)),
-        [0x00, 0x00],
-      ));
-      const h = parseVarHeader((await this._expect([VPKT.VAR_HDR])).data);
-      const data = (await this._expect([VPKT.VAR_CNTS], this.appTimeout)).data;
-      const ver = h.attrs.get(ATTR.VERSION);
-      const a = h.attrs.get(ATTR.ARCHIVED);
-      const embedded = appNameFromData(data);
-      return {
-        name: h.name, nameBytes: h.nameBytes, type: TYPE.FLASH_APP, typeName: typeName(TYPE.FLASH_APP),
-        version: ver && ver.length ? ver[ver.length - 1] : 0, archived: a ? a[0] !== 0 : true,
-        data, size: data.length,
-        app: {
-          headerName: h.name, embeddedName: embedded ? latin1(embedded) : null,
-          hardwareId: pid && pid.length ? pid[pid.length - 1] : undefined,
-        },
-      };
-    });
+  deleteApp(name) {
+    return this.delete(name, TYPE.FLASH_APP);
   }
 
-  /** Delete an installed application (the ordinary delete, type 0x24). */
-  deleteApp(name) { return this.delete(name, TYPE.FLASH_APP); }
-
-  /** Before writing Flash: refuse when the calculator says its battery is not good enough. */
-  async _batteryCheck() {
-    const ids = [PARAM.BATTERY_OK, ...(this.quirks.appBatteryDetail ? [0x002E, 0x002F] : [])];
-    await this._sendVirtual(VPKT.PARAM_REQ, bytes(u16(ids.length), ...ids.map(u16)));
-    const raw = parseParamData((await this._expect([VPKT.PARAM_DATA])).data);
-    const num = id => (raw.has(id) ? rdUint(raw.get(id)) : undefined);
-    this.lastBattery = { ok: num(0x002D) === undefined ? undefined : num(0x002D) !== 0, level: num(0x002E), external: num(0x002F) === undefined ? undefined : num(0x002F) !== 0 };
-    if (this.lastBattery.ok !== false) return; // good, or not reported: the calculator refuses with 0x002B if it must
-    const extra = [];
-    if (this.lastBattery.level !== undefined) extra.push(`it reports ${this.lastBattery.level}%`);
-    if (this.lastBattery.external) extra.push('it is on external power');
-    throw new CELinkError('LOW_BATTERY', `The calculator's battery is too low to write an app to Flash${extra.length ? ` (${extra.join(', ')})` : ''}. Charge it or change the batteries, then try again. Nothing was sent.`);
-  }
-
-  // -------------------------------------------------------------- capture
-
-  exportCapture() {
-    const state = { out: true, in: true };
-    const packets = this.captureLog.map(p => ({ dir: p.dir, t: p.t, hex: hex(p.bytes), note: describeRaw(p.bytes, state, p.dir) }));
-    return JSON.stringify({
-      format: 'celink-capture/1',
-      created: new Date().toISOString(),
-      device: { vendorId: hex4(this.device.vendorId), productId: hex4(this.device.productId), productName: this.device.productName ?? null },
-      endpoints: this.epIn ? { in: this.epIn.endpointNumber, out: this.epOut.endpointNumber, packetSize: this.epIn.packetSize } : null,
-      allocation: this.allocation,
-      bufferSize: this.bufferSize,
-      quirks: this.quirks,
-      ops: this.captureOps,
-      packets,
-    }, null, 1);
-  }
-
-  _log(dir, b) {
-    if (!this.capture) return;
-    if (this._t0 == null) this._t0 = performance.now();
-    this.captureLog.push({ dir, t: Math.round((performance.now() - this._t0) * 10) / 10, bytes: b.slice() });
-  }
-
-  // -------------------------------------------------------------- operation plumbing
-
-  /** Close the link and refuse every later call with a clear reason until open() is called again. */
-  async _poison(reason) {
-    this._poisoned = reason;
-    await this.close();
-  }
-
-  _op(label, fn) {
+  // One operation at a time: a call made while another runs waits its turn.
+  #run(op, fn) {
     const run = async () => {
-      if (this._poisoned) throw new CELinkError('LINK_CLOSED', this._poisoned);
+      if (this.#closedReason) throw new CELinkError('LINK_CLOSED', this.#closedReason);
       if (!this.opened) throw new CELinkError('NOT_OPEN', 'The calculator is not connected. Call open() first.');
-      if (this.capture) {
-        if (this._t0 == null) this._t0 = performance.now();
-        this.captureOps.push({ t: Math.round((performance.now() - this._t0) * 10) / 10, op: label });
-      }
+      if (op !== 'ready' && this.#bufferSize === null) throw new CELinkError('NOT_READY', 'The link is not ready. Call ready() first.');
+      this.#op = op;
       try {
         return await fn();
       } catch (e) {
-        const err = e instanceof CELinkError ? e : usbError(e);
-        if (FATAL.has(err.code)) {
-          if (err.code !== 'DISCONNECTED') await this._clearHalts();
+        if (LINK_LOST.includes(e?.code)) {
+          if (e.code !== 'DISCONNECTED') await this.#clearHalts();
           await this.close();
         }
-        throw err;
+        throw e;
       }
     };
-    const p = this._lock.then(run, run);
-    this._lock = p.catch(() => {});
-    return p;
+    const result = this.#queue.then(run, run);
+    this.#queue = result.catch(() => {});
+    return result;
   }
 
-  /** First recovery step after a stuck transfer: clear a halt on both endpoints. Best effort. */
-  async _clearHalts() {
-    const d = this.device;
-    if (typeof d.clearHalt !== 'function' || !this.epOut) return;
-    for (const [dir, ep] of [['out', this.epOut.endpointNumber], ['in', this.epIn.endpointNumber]]) {
-      try { await this._timed(d.clearHalt(dir, ep), 500, 'clearing the endpoint'); } catch { /* the close that follows is the real recovery */ }
+  // Best effort: the close that follows is the real recovery.
+  async #clearHalts() {
+    if (typeof this.device.clearHalt !== 'function' || !this.#out) return;
+    for (const [direction, endpoint] of [['out', this.#out], ['in', this.#in]]) {
+      try {
+        await this.#transfer(this.device.clearHalt(direction, endpoint.endpointNumber), CLEAR_HALT_MS, 'clearing the endpoint');
+      } catch { /* already gone */ }
+    }
+    this.#anomaly('haltsCleared', 'both endpoints, before closing the link');
+  }
+
+  #anomaly(kind, detail) {
+    this.anomalies[kind]++;
+    try { this.onAnomaly?.(kind, detail); } catch { /* a listener never breaks the link */ }
+  }
+
+  // A CE allocating 1023 takes 1018 data bytes a packet, and a larger packet
+  // wedged it until replugged (observed on hardware). Leaving room for the
+  // 5-byte raw header at any allocation keeps to that; libticalcs caps at 1018.
+  #allocate(size) {
+    const data = Math.min(size - RAW_HEADER, CE_MAX_DATA);
+    if (data <= VPKT_HEADER) throw protocolError(`The calculator allocated an unusable buffer of ${size} bytes.`);
+    this.#bufferSize = data;
+  }
+
+  async #sendVirtual(type, data = [], { timeout = this.#timeout, onProgress, onLastPacket } = {}) {
+    const v = encodeVirtual(type, data);
+    for (let offset = 0; offset < v.length;) {
+      // Split packet by packet: the calculator may ask for a new size in between.
+      const packet = rawPacketAt(v, offset, this.#bufferSize);
+      const last = packet.type === RAW.DATA_LAST;
+      if (last) onLastPacket?.();
+      await this.#writeRaw(packet.type, packet.data, timeout);
+      if (last && needsZeroLength(packet.data.length)) await this.#write(new Uint8Array(0), timeout, 'ending a transfer');
+      await this.#readAck(timeout);
+      offset += packet.data.length;
+      onProgress?.(offset);
     }
   }
 
-  /** The 4-byte type attribute for `command` ('send', 'receive' or 'delete'). */
-  _typeWord(type, command) {
-    if (!Number.isInteger(type) || type < 0 || type > 0xFF) throw new CELinkError('BAD_ENTRY', `Unknown variable type ${type}.`);
-    const q = this.quirks;
-    const prefix = (q.learnTypePrefix && this._prefixes.get(type)) || q.typePrefixes[command];
-    return ((prefix & 0xFFFFFF00) | type) >>> 0;
-  }
-
-  /**
-   * Every operation starts here: a pause if a send has only just ended, then the
-   * buffer size negotiation and Ping / Set Mode. Those two run before every
-   * operation by default: the first hardware pass did that and it worked, and it
-   * also clears anything an earlier exchange left behind. With
-   * `negotiateEachOperation: false` they run once per connection, as they would
-   * for a host that keeps the session's allocation and mode.
-   */
-  async _begin() {
-    const q = this.quirks;
-    if (this._sentAt != null) {
-      const wait = q.settleMs - (performance.now() - this._sentAt);
-      this._sentAt = null;
-      if (wait > 0) await sleep(wait);
+  async #readAck(timeout) {
+    let r = await this.#readRaw(timeout);
+    if (r.type === RAW.BUF_REQ && r.data.length === 4) {
+      // Allocated as asked, as libticalcs does; #allocate still caps the data per packet.
+      const size = readBe32(r.data, 0);
+      await this.#writeRaw(RAW.BUF_ALLOC, be32(size), timeout);
+      this.#allocate(size);
+      r = await this.#readRaw(timeout);
     }
-    if (!q.negotiateEachOperation && this._session) return;
-    this._session = false;
-    this.bufferSize = null;
-    await this._writeRaw(RAW.BUF_REQ, u32(q.requestBufferSize));
-    for (let i = 0; ; i++) {
-      const r = await this._readRaw();
-      if (r.type === RAW.BUF_ALLOC && r.data.length === 4) {
-        this._setAllocation(rd32(r.data, 0));
-        break;
-      }
-      // Leftovers from an earlier exchange: acknowledge data, skip acks, then retry.
-      if (i < 8 && (r.type === RAW.DATA || r.type === RAW.DATA_FINAL)) { await this._writeRaw(RAW.ACK, [0xE0, 0x00]); continue; }
-      if (i < 8 && r.type === RAW.ACK) continue;
-      throw new CELinkError('PROTOCOL', `Expected a buffer size answer from the calculator, got raw packet type ${r.type}.`);
-    }
-    await this._sendVirtual(VPKT.PING, bytes(q.modeId, u32(q.pingValue)));
-    const ack = await this._expect([VPKT.MODE_ACK]);
-    this.lastModeAck = ack.data;
-    this._session = true;
+    // libticalcs accepts 2 or 4 bytes and rejects only when both bytes are wrong; here both must be E0 00.
+    const ok = r.type === RAW.ACK && (r.data.length === 2 || r.data.length === 4) && r.data[0] === 0xE0 && r.data[1] === 0x00;
+    if (!ok) throw protocolError(`The calculator did not acknowledge a packet (it sent raw packet type ${r.type}).`);
   }
 
-  /**
-   * Turn a buffer size from the calculator into data bytes per raw packet. On
-   * the CE an allocation of 1023 means 1018 data bytes: a 1023-data-byte packet
-   * was never acknowledged and wedged the link, and the CE's own packets are
-   * 1018 + 5. The CE allocates more than it supports, so 1018 is also a hard
-   * ceiling whichever rule is in force.
-   */
-  _setAllocation(alloc) {
-    const q = this.quirks;
-    const data = Math.min(q.requestBufferSize - (q.allocIncludesHeader ? 5 : 0), alloc - (q.allocIncludesHeader ? 5 : 0), q.maxDataBytes);
-    if (data < 8) throw new CELinkError('PROTOCOL', `The calculator offered an unusable buffer size (${alloc}).`);
-    this.allocation = alloc;
-    this.bufferSize = data;
-  }
-
-  async _sendVirtual(vtype, data, { timeout = this.timeout, onChunk, onFinalWriteStarted, onFinalWritten } = {}) {
-    const v = encodeVirtual(vtype, data);
-    const q = this.quirks;
-    for (let off = 0; ;) {
-      // bufferSize is read per packet: the calculator may change it mid-stream.
-      const chunk = nextChunk(v, off, this.bufferSize, q.emptyFinalOnBoundary);
-      const final = chunk.type === RAW.DATA_FINAL;
-      // The point of no return for a reboot-on-landing send: the write of the
-      // last data packet is about to start. A calculator that reboots as it
-      // lands can make this very transferOut reject even though every USB packet
-      // was taken, so from here a link drop is the landing, not a failure.
-      if (final) onFinalWriteStarted?.();
-      await this._writeRaw(chunk.type, chunk.data, timeout);
-      // Without this the CE waits forever for the end of the transfer and the
-      // link stays dead until the calculator is unplugged. Only the final packet
-      // needs it: the CE's own acknowledgement ends a type 3 exchange.
-      if (final && q.zeroLengthAfterFinal && needsZeroLength(chunk.data.length)) {
-        await this._writeZeroLength(timeout);
-      }
-      // The whole payload is now on the wire. A calculator that reboots as the
-      // variable lands may never acknowledge from here on.
-      if (final) onFinalWritten?.();
-      await this._readAck(timeout);
-      off += chunk.data.length;
-      onChunk?.(off);
-      if (final) return;
-    }
-  }
-
-  /**
-   * Read the calculator's acknowledgement of the raw packet just sent. The
-   * calculator may instead reopen the buffer size negotiation: it sends its own
-   * Buffer Size Request, we answer with an allocation of that same size and use
-   * it from the next packet on, and the acknowledgement follows.
-   */
-  async _readAck(timeout = this.timeout) {
-    for (;;) {
-      const r = await this._readRaw(timeout);
-      if (r.type === RAW.BUF_REQ && r.data.length === 4) {
-        const size = rd32(r.data, 0);
-        await this._writeRaw(RAW.BUF_ALLOC, u32(size), timeout);
-        this._setAllocation(size);
-        continue;
-      }
-      if (r.type === RAW.ACK && (r.data.length === 2 || r.data.length === 4) && r.data[0] === 0xE0 && r.data[1] === 0x00) return;
-      throw new CELinkError('PROTOCOL', `The calculator did not acknowledge a packet (got raw type ${r.type}: ${hex(r.data.subarray(0, 8))}).`);
-    }
-  }
-
-  async _readVirtual(timeout = this.timeout) {
+  async #readVirtual(timeout) {
     const chunks = [];
-    let total = 0;
-    let want = null;
     for (;;) {
-      const r = await this._readRaw(timeout);
-      if (r.type !== RAW.DATA && r.type !== RAW.DATA_FINAL) {
-        throw new CELinkError('PROTOCOL', `Expected data from the calculator, got raw packet type ${r.type}.`);
-      }
-      await this._writeRaw(RAW.ACK, [0xE0, 0x00], timeout);
+      const r = await this.#readRaw(timeout);
+      if (r.type !== RAW.DATA && r.type !== RAW.DATA_LAST) throw protocolError(`Expected data from the calculator, got raw packet type ${r.type}.`);
+      await this.#writeRaw(RAW.ACK, [0xE0, 0x00], timeout);
       chunks.push(r.data);
-      total += r.data.length;
-      if (want == null && total >= 4) { const h = bytes(...chunks); want = rd32(h, 0) + 6; }
-      if (want != null && total > want) throw new CELinkError('PROTOCOL', 'The calculator sent more data than its packet header announced.');
-      if (r.type === RAW.DATA_FINAL) return joinVirtual(chunks);
+      if (r.type === RAW.DATA_LAST) return joinVirtual(chunks);
     }
   }
 
-  /**
-   * Read virtual packets until one of `types` arrives. 0xEE00 becomes CALC_ERROR.
-   * 0xBB00 is the calculator asking the host to wait before reading on: its first
-   * 4 bytes are the delay in microseconds (big-endian), capped at 400 ms; with
-   * fewer than 4 bytes the wait is 100 ms.
-   */
-  async _expect(types, timeout = this.timeout) {
+  /** Read virtual packets until one of `types`. `step` names the reply in a CALC_ERROR. */
+  async #expect(types, step, timeout = this.#timeout) {
+    const deadline = performance.now() + timeout;
     for (;;) {
-      const v = await this._readVirtual(timeout);
-      if (v.type === VPKT.DELAY) {
-        const ms = delayMs(v.data, this.quirks.delayCapMicros);
-        this.lastDelayMs = ms;
-        await sleep(ms);
+      const v = await this.#readVirtual(timeout);
+      if (v.type === VPKT.DELAY_ACK) {
+        // libticalcs reads 4 bytes whatever arrived; a shorter delay gets the longest wait it could.
+        const us = v.data.length >= 4 ? Math.min(readBe32(v.data, 0), DELAY_CAP_US) : DELAY_CAP_US;
+        await sleep(Math.floor(us / 1000));
+        // libticalcs takes one delay per reply. Later ones are waited out too,
+        // since refusing them could only lose a send; the deadline bounds them.
+        if (performance.now() > deadline) throw new CELinkError('TIMEOUT', `The calculator kept asking for more time (${step}).`);
         continue;
       }
-      if (v.type === VPKT.ERROR) {
-        const code = v.data.length >= 2 ? rd16(v.data, 0) : -1;
-        const what = CALC_ERRORS[code] ?? 'an error code this library does not know; please report it';
-        throw new CELinkError('CALC_ERROR', `The calculator refused the request (error 0x${code.toString(16).padStart(4, '0')}: ${what}).`, { calcError: code });
+      if (v.type === VPKT.ERROR) throw calcError(v.data, this.#op, step);
+      if (!types.includes(v.type)) {
+        throw protocolError(`Expected ${types.map(vpktName).join(' or ')} from the calculator (${step}), got ${vpktName(v.type)}.`);
       }
-      if (types.includes(v.type)) return v;
-      throw new CELinkError('PROTOCOL', `Expected ${types.map(vname).join(' or ')} from the calculator, got ${vname(v.type)}.`);
+      return v;
     }
   }
 
-  // -------------------------------------------------------------- raw packets over USB
+  #writeRaw(type, data, timeout = this.#timeout) {
+    return this.#write(encodeRaw(type, data), timeout, 'sending');
+  }
 
-  async _writeRaw(type, data, timeout = this.timeout) {
-    if ((type === RAW.DATA || type === RAW.DATA_FINAL) && data.length > this.bufferSize) {
-      throw new CELinkError('PROTOCOL', 'Internal error: a raw packet is larger than the negotiated buffer.');
-    }
-    const pkt = encodeRaw(type, data);
-    this._log('out', pkt);
-    const r = await this._timed(this.device.transferOut(this.epOut.endpointNumber, pkt), timeout, 'sending');
-    if (r.status !== 'ok' || (r.bytesWritten != null && r.bytesWritten !== pkt.length)) {
-      throw new CELinkError('USB_ERROR', `The calculator did not take a packet (USB status "${r.status}", ${r.bytesWritten ?? 0} of ${pkt.length} bytes).`);
+  async #write(bytes, timeout, what) {
+    this.onPacket?.('out', bytes);
+    const r = await this.#transfer(this.device.transferOut(this.#out.endpointNumber, bytes), timeout, what);
+    if (r.status !== 'ok' || (r.bytesWritten ?? bytes.length) !== bytes.length) {
+      throw new CELinkError('USB_ERROR', `The calculator did not take a packet (USB status "${r.status}", ${r.bytesWritten ?? 0} of ${bytes.length} bytes).`);
     }
   }
 
-  async _writeZeroLength(timeout = this.timeout) {
-    const empty = new Uint8Array(0);
-    this._log('out', empty);
-    const r = await this._timed(this.device.transferOut(this.epOut.endpointNumber, empty), timeout, 'ending a transfer');
-    if (r.status !== 'ok') throw new CELinkError('USB_ERROR', `The calculator did not take the zero-length end of a transfer (USB status "${r.status}").`);
-  }
-
-  async _readRaw(timeout = this.timeout) {
+  async #readRaw(timeout = this.#timeout) {
     for (;;) {
-      const r = decodeRaw(this._rx);
+      if (this.#rx.length >= RAW_HEADER && readBe32(this.#rx, 0) > MAX_RAW_DATA) {
+        throw protocolError(`The calculator sent a raw packet header of ${readBe32(this.#rx, 0)} bytes; the most is ${MAX_RAW_DATA}.`);
+      }
+      const r = decodeRaw(this.#rx);
       if (r) {
-        const pkt = this._rx.slice(0, r.length);
-        this._rx = this._rx.slice(r.length);
-        this._log('in', pkt);
+        this.onPacket?.('in', this.#rx.slice(0, r.length));
+        this.#rx = this.#rx.slice(r.length);
         return r;
       }
-      // Always ask for whole USB packets: a read shorter than the packet the
-      // calculator sends is babble. Once the header is in, ask for the rest of the
-      // raw packet rounded up to whole packets (it ends on a short packet, or
-      // exactly on the boundary); whatever arrives past it is kept for next time.
-      const pkt = this.epIn.packetSize || USB_PACKET;
-      let want = pkt;
-      if (this._rx.length >= 5 && !this.quirks.readOnePacket) {
-        const len = rd32(this._rx, 0);
-        if (len > 0x10000) throw new CELinkError('PROTOCOL', `The calculator sent a raw packet header claiming ${len} bytes; the link is out of step.`);
-        want = Math.max(pkt, Math.ceil((5 + len - this._rx.length) / pkt) * pkt);
-      }
-      const res = await this._timed(this.device.transferIn(this.epIn.endpointNumber, want), timeout, 'waiting for the calculator');
+      // Reads ask for whole USB packets: one until the header is in, then the
+      // rest of the raw packet rounded up. libticalcs reads one packet at a
+      // time; whole-packet reads are what ran on hardware.
+      const packet = this.#in.packetSize;
+      const missing = this.#rx.length >= RAW_HEADER ? RAW_HEADER + readBe32(this.#rx, 0) - this.#rx.length : 0;
+      const length = Math.max(packet, Math.ceil(missing / packet) * packet);
+      const res = await this.#transfer(this.device.transferIn(this.#in.endpointNumber, length), timeout, 'waiting for the calculator');
       if (res.status !== 'ok') throw new CELinkError('USB_ERROR', `Reading from the calculator failed (USB status "${res.status}").`);
-      const dv = res.data;
-      if (!dv || dv.byteLength === 0) continue;
-      this._rx = bytes(this._rx, new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+      if (res.data?.byteLength) this.#rx = concat(this.#rx, new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength));
     }
   }
 
-  async _timed(promise, ms, what) {
+  async #transfer(transfer, ms, what) {
     let timer;
-    promise.catch(() => {}); // a transfer abandoned by a timeout rejects later, on close
-    const t = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new CELinkError('TIMEOUT',
-        `The calculator stopped answering (${what}, no reply in ${ms} ms). Check the cable, make sure the calculator is on and at the home screen, then connect again.`)), ms);
+    transfer.catch(() => {}); // a transfer abandoned by a timeout rejects later, on close
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new CELinkError('TIMEOUT', `The calculator did not answer within ${ms} ms (${what}).`, { ms, during: what })), ms);
     });
-    try { return await Promise.race([promise, t]); } finally { clearTimeout(timer); }
-  }
-}
-
-// ------------------------------------------------------------------ helpers
-
-/** What the calculator's 0xEE00 error codes mean. The codes (all 24, in this
- *  order) and their meanings follow libticalcs: src/dusb_cmd.cc (usb_errors[])
- *  and src/error.cc. */
-export const CALC_ERRORS = {
-  0x0004: 'invalid argument or name',
-  0x0006: 'a variable or app cannot be deleted from the archive',
-  0x0008: 'transmission error',
-  0x0009: 'the calculator is in boot mode',
-  0x000C: 'the calculator is out of memory. Delete or archive something and try again',
-  0x000D: 'invalid name',
-  0x000E: 'invalid name',
-  0x0011: 'the calculator is busy',
-  0x0012: 'a variable with that name is locked and cannot be replaced',
-  0x001B: 'the variable is too large for the calculator',
-  0x001C: 'the ping value was too small',
-  0x001D: 'the ping value was too large',
-  0x0021: 'wrong size for that parameter',
-  0x0022: 'unknown parameter',
-  0x0023: 'that parameter is read-only',
-  0x0027: 'bad modify request',
-  0x0029: 'remote-control problem',
-  0x002B: 'the battery is low. Charge the calculator and try again',
-  0x002C: 'the Flash app was rejected',
-  0x002D: 'the Flash app was rejected',
-  0x002E: 'the Flash app was rejected: its signature does not match',
-  0x002F: 'the Flash app was rejected',
-  0x0030: 'the Flash app was rejected',
-  0x0034: 'the calculator is busy. Go to the home screen and try again',
-};
-
-/** Sentences for the codes an application send can meet, in the app's terms. */
-export const APP_ERRORS = {
-  0x0006: 'an older copy of this app is on the calculator and could not be removed',
-  0x000C: 'there is not enough free archive memory for this app. Delete or move something out of the archive and try again',
-  0x0011: 'the calculator is busy. Go to the home screen and try again',
-  0x001B: 'the app is too large for this calculator',
-  0x002B: 'the battery is too low to write Flash. Charge the calculator and try again',
-  0x002C: 'the calculator rejected the app',
-  0x002D: 'the calculator rejected the app',
-  0x002E: 'the calculator rejected the app because its signature does not match. The file may be damaged, changed, or not made for this calculator',
-  0x002F: 'the calculator rejected the app',
-  0x0030: 'the calculator rejected the app',
-  0x0034: 'the calculator is busy. Go to the home screen and try again',
-};
-
-/** An application entry from file bytes, a parse result or an entry. */
-function appEntry(app) {
-  let e = app;
-  if (app instanceof Uint8Array || app instanceof ArrayBuffer) e = parseAppFile(app).entries[0];
-  else if (app && Array.isArray(app.entries)) e = app.entries[0];
-  if (!e || e.type !== TYPE.FLASH_APP || !(e.data instanceof Uint8Array) || e.data.length === 0) {
-    throw new CELinkError('BAD_ENTRY', 'sendApp() needs a Flash application: the .8ek file\'s bytes, or what parseFile returned for it.');
-  }
-  if (!e.name && !e.nameBytes) throw new CELinkError('BAD_NAME', 'The application has no name.');
-  return e;
-}
-
-function latin1(b) { let s = ''; for (const c of b) s += String.fromCharCode(c); return s; }
-
-/** Pick configuration 1 when it has a bulk IN + OUT pair, else the first one that does. */
-export function findBulkInterface(device) {
-  const configs = [...(device.configurations ?? [])];
-  configs.sort((a, b) => (a.configurationValue === 1 ? -1 : 0) - (b.configurationValue === 1 ? -1 : 0));
-  for (const c of configs) {
-    for (const i of c.interfaces ?? []) {
-      for (const alt of i.alternates ?? [i.alternate]) {
-        if (!alt) continue;
-        const eps = alt.endpoints ?? [];
-        const epIn = eps.find(e => e.type === 'bulk' && e.direction === 'in');
-        const epOut = eps.find(e => e.type === 'bulk' && e.direction === 'out');
-        if (epIn && epOut) {
-          return { configurationValue: c.configurationValue, interfaceNumber: i.interfaceNumber, alternateSetting: alt.alternateSetting ?? 0, epIn, epOut };
-        }
-      }
+    try {
+      return await Promise.race([transfer, timeout]);
+    } catch (e) {
+      if (e instanceof CELinkError) throw e;
+      if (e?.name === 'NotFoundError') throw new CELinkError('DISCONNECTED', 'The calculator was unplugged or turned off.');
+      throw new CELinkError('USB_ERROR', `USB transfer failed: ${e?.message ?? e}`);
+    } finally {
+      clearTimeout(timer);
     }
   }
-  return null;
-}
-
-/**
- * Names go over the wire as the calculator's own readable name in UTF-8: "HELLO",
- * "AθB", and for built-ins the subscript spelling, so "L1" is sent as "L₁"
- * (4C E2 82 81) and a named list without its ⌊. Byte arrays (a list() row's
- * nameBytes) pass through untouched.
- */
-export function wireName(name, type) {
-  if (name instanceof Uint8Array) {
-    if (name.length === 0) throw new CELinkError('BAD_NAME', 'A variable name cannot be empty.');
-    return name;
-  }
-  if (typeof name !== 'string' || name.length === 0) throw new CELinkError('BAD_NAME', 'A variable name must be a non-empty string.');
-  return utf8.encode(type == null ? name : canonicalName(name, type));
-}
-
-/** Milliseconds a Delay Acknowledgement asks for. */
-export function delayMs(data, capMicros = 400000) {
-  if (!data || data.length < 4) return 100;
-  return Math.min(rd32(data, 0), capMicros) / 1000;
-}
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function printable(name) { return name instanceof Uint8Array ? utf8d.decode(name) : String(name); }
-function hex4(n) { return n == null ? null : '0x' + n.toString(16).toUpperCase().padStart(4, '0'); }
-function vname(t) { return `0x${t.toString(16).toUpperCase().padStart(4, '0')} (${VPKT_NAMES[t] ?? 'unknown'})`; }
-
-function usbError(e) {
-  if (e?.name === 'NotFoundError') return new CELinkError('DISCONNECTED', 'The calculator was unplugged or turned off.');
-  return new CELinkError('USB_ERROR', `USB transfer failed: ${e?.message ?? e}`);
-}
-
-const RAW_NAMES = { 1: 'buffer size request', 2: 'buffer size allocation', 3: 'data, continues', 4: 'data, final', 5: 'acknowledgement' };
-
-/** One-line description of a captured raw packet. `state` is { out: true, in: true } at the start of a log. */
-export function describeRaw(b, state, dir) {
-  if (b.length === 0) return 'zero-length write (ends a transfer that filled whole USB packets)';
-  const r = decodeRaw(b);
-  if (!r) return 'incomplete raw packet';
-  let s = `raw ${r.type} (${RAW_NAMES[r.type] ?? 'unknown'}), ${r.data.length} bytes`;
-  if (r.type === 1 || r.type === 2) s += `: ${rd32(r.data, 0)}`;
-  if (r.type === 3 || r.type === 4) {
-    if (state[dir] && r.data.length >= 6) s += ` | virtual ${vname(rd16(r.data, 4))}, ${rd32(r.data, 0)} bytes`;
-    else if (!state[dir]) s += ' | continuation';
-    state[dir] = r.type === 4;
-  }
-  return s;
 }
