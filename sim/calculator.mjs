@@ -19,7 +19,8 @@ const decoder = new TextDecoder();
  */
 export const SIM_ERR = Object.freeze({
   NO_MODE: 0x0001, // seen on hardware; that the host had not pinged the mode is inferred
-  NO_MEMORY: 0x000C, PING_TOO_SMALL: 0x001C, PING_TOO_BIG: 0x001D, BATTERY_LOW: 0x002B, BAD_SIGNATURE: 0x002E,
+  READ_REFUSED: 0x0006, NO_MEMORY: 0x000C, PING_TOO_SMALL: 0x001C, PING_TOO_BIG: 0x001D, BATTERY_LOW: 0x002B, BAD_SIGNATURE: 0x002E,
+  PROGRAM_RUNNING: 0x0036,
   WRONG_MODE: 0x7F02, BAD_PACKET: 0x7F03, NOT_FOUND: 0x7F04, UNSUPPORTED: 0x7F06,
   BAD_NAME: 0x7F07, BAD_MODE: 0x7F08, OUT_OF_ORDER: 0x7F09,
 });
@@ -110,6 +111,7 @@ export class SimulatedCalculator {
     renegotiate = null,         // { afterPackets, size }: ask for a new buffer size mid-stream
     lowBattery = false,         // refuse an application send with 0x002B
     refuse = null,              // { step, code, times }: answer that step with an error (steps in STEPS)
+    running = false,            // a program running on the calculator; settable at any time
     leftovers = [],             // raw packets { type, data } sent before the answer to the next Buffer Size
                                 // Request, as an earlier exchange might leave; never observed on hardware
   } = {}) {
@@ -144,6 +146,7 @@ export class SimulatedCalculator {
     this.renegotiate = renegotiate;
     this.lowBattery = lowBattery;
     this.refuse = refuse && { times: Infinity, ...refuse };
+    this.running = running;
     this.leftovers = [...leftovers];
     this.vars = new Map();
     for (const v of vars) this._store(v.name, v.type, v.data, !!v.archived, v.version ?? 0);
@@ -302,6 +305,18 @@ export class SimulatedCalculator {
     return r.code;
   }
 
+  // A program running on the calculator (observed on hardware, a TI-Basic
+  // program at Input and a shell alike): the Request to Send and the delete
+  // are refused with 0x0036, whether or not the variable exists, while the
+  // mode, the parameters and the listing still answer. A variable request was
+  // answered 0x0006, but only for a name that was not there, so the
+  // simulator refuses every read with it.
+  _runningRefusal(step) {
+    if (!this.running) return null;
+    if (step === 'rts' || step === 'delete') return SIM_ERR.PROGRAM_RUNNING;
+    if (step === 'request') return SIM_ERR.READ_REFUSED;
+    return null;
+  }
 
   _hostRaw(b) {
     if (b.length < 5) return this._violation('A transfer shorter than a raw packet header was sent.');
@@ -532,7 +547,7 @@ export class SimulatedCalculator {
     this.commands.push({ type, data: d.slice() });
     if (this.freeze || this.intercept?.(type, d)) return;
     try {
-      const refused = STEPS[type] !== 'contents' && this._refusal(STEPS[type]);
+      const refused = STEPS[type] !== 'contents' && (this._refusal(STEPS[type]) || this._runningRefusal(STEPS[type]));
       if (refused) return this._queueError(refused);
       if (type === 0x0001) return this._ping(d);
       if (this.mode == null) {

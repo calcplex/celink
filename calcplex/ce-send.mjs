@@ -9,8 +9,8 @@
 // Without WebUSB, or on a phone, the page keeps its download buttons only.
 import { PROGRAMS, sendGame, collectEntries, isAssembly, inspect, jailbreakState, unpackZip, pickCalculator } from './gamesend.mjs';
 import {
-  PREVIEW_HOST, TICONNECT_URL, calcParams, esc, failReason, refusedAt, isChromeOS, isWindows, linkDead, refusal, refusalText,
-  startHint, track, trackConnectFail,
+  PREVIEW_HOST, TICONNECT_URL, archiveMode, calcParams, downloadParams, esc, failReason, jbPromptChoice, refusedAt, isChromeOS, isWindows, linkDead,
+  pageErrorText, refusal, startHint, track, trackConnectFail,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
@@ -49,10 +49,16 @@ function wasDownloaded(file) {
   if (downloaded.has(file)) return true;
   try { return sessionStorage.getItem('ce-send-dl:' + file) === '1'; } catch { return false; }
 }
+// One listener per page, so each click on a download link counts once, in
+// ce_download, apart from GA4's own file_download.
 function watchDownloads(root) {
   root.addEventListener('click', e => {
     const a = e.target.closest?.('a[href^="/downloads/ce/"]');
-    if (a) markDownloaded(decodedHref(a));
+    if (!a) return;
+    const file = decodedHref(a);
+    markDownloaded(file);
+    const params = downloadParams(file, page, link && calc);
+    if (params) track('ce_download', params);
   });
 }
 
@@ -63,7 +69,8 @@ async function gameFiles(file, label) {
   return /\.zip$/i.test(file) ? unpackZip(bytes) : [bytes];
 }
 
-const LOST_TEXT = 'The calculator stopped responding. Unplug it, plug it back in, and try again.';
+// A running game stops the calculator answering USB; quitting the game is enough (observed on hardware).
+const LOST_TEXT = 'The calculator stopped responding. If a game is running on it, quit the game and try again. Otherwise, unplug it, plug it back in, and try again.';
 const OUTCOME_TEXT = {
   no_device: "No calculator was picked. Make sure it's plugged in and turned on, then try again. Not in the list? Try a different USB cable; charge-only cables won't work.",
   open_failed: "Couldn't connect. Close anything else using the calculator (like TI Connect CE or another tab), unplug it and plug it back in, then try again.",
@@ -78,13 +85,9 @@ const CHROMEOS_TEXT = {
   open_failed: "Couldn't connect. Close any other tab using the calculator, unplug it and plug it back in, then try again. Some school Chromebooks don't let websites use USB devices, so if it keeps failing, try a Windows or Mac computer.",
 };
 
-function errorText(err) {
-  const reason = failReason(err);
-  let text = (WIN && WINDOWS_TEXT[reason]) || (CROS && CHROMEOS_TEXT[reason]) || OUTCOME_TEXT[reason] || refusalText(err) || err?.message || String(err);
-  if (err?.partial?.length || err?.removed?.length) text += ' Press Send again to finish.';
-  // The engine says "game"; on the math page the thing is a program.
-  return page === 'math' ? text.replace(/\bgame\b/g, 'program') : text;
-}
+// This page's sentences by reason, the platform's own first.
+const OWN_TEXT = { ...OUTCOME_TEXT, ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}) };
+const errorText = err => pageErrorText(err, { page, own: OWN_TEXT });
 
 // One link per page, opened on the first click that needs it, or on load when
 // the browser already allowed a plugged-in calculator on this site.
@@ -118,6 +121,7 @@ async function connect(say, { quiet = false } = {}) {
   let l;
   try {
     l = await pickCalculator();
+    say('Connecting to your calculator…');
     await l.open();
     calc = await inspect(l);
   } catch (err) {
@@ -127,7 +131,7 @@ async function connect(say, { quiet = false } = {}) {
     throw err;
   }
   link = l;
-  track('ce_calc_info', { ...calcParams(calc), route: calc.route, page });
+  track('ce_calc_info', { ...calcParams(calc), route: calc.route, page, jb: jailbreakState(calc.route, calc.tools) });
   refreshPresent();
   return calc;
 }
@@ -214,13 +218,18 @@ function askTIConnect() {
   });
 }
 
-// Resolves true to send anyway.
-function askJailbreak() {
-  return modal(`<h2>Jailbreak your calculator first</h2>
+// Resolves how the prompt closed: 'installer' (the link, which navigates on),
+// 'send_anyway', or 'cancel' (Escape or a click outside).
+async function askJailbreak() {
+  const choice = await modal(`<h2>Jailbreak your calculator first</h2>
       <p>This calculator can't run games until it's jailbroken. It only takes a few minutes, and then every game here will work.</p>
       <p class="ce-modal-actions"><a class="ce-modal-go" href="${INSTALLER}">Jailbreak it now</a>
       <button type="button" class="ce-modal-anyway">Send anyway</button></p>`,
-  (d, done) => { d.querySelector('.ce-modal-anyway').onclick = () => done(true); });
+  (d, done) => {
+    d.querySelector('.ce-modal-go').addEventListener('click', () => done('installer'));
+    d.querySelector('.ce-modal-anyway').onclick = () => done('send_anyway');
+  });
+  return jbPromptChoice(choice);
 }
 
 // `where` finishes the "pick a game" sentence for the page it is on.
@@ -266,18 +275,23 @@ async function run({ file, label, say, show }) {
     const files = await gameFiles(file, label);
     const entries = collectEntries(files);
     const asm = entries.some(isAssembly);
-    if (asm && !sendAnyway && jailbreakState(c.route, c.tools) === 'missing') {
-      say('');
-      if (!(await askJailbreak())) return;
-      sendAnyway = true;
-    }
     const main = entries.filter(e => PROGRAMS.includes(e.type)).at(-1);
     const game = main ? main.name : label.slice(0, 20);
+    if (asm && !sendAnyway && jailbreakState(c.route, c.tools) === 'missing') {
+      say('');
+      const choice = await askJailbreak();
+      track('ce_jb_prompt', { choice, page, route: c.route, game });
+      if (choice !== 'send_anyway') return;
+      sendAnyway = true;
+    }
     const sending = pct => say(`Sending ${label} to your calculator… ${pct}%`);
     sending(0);
     let r;
     try {
-      r = await sendGame(link, files, { onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); } });
+      r = await sendGame(link, files, {
+        archive: archiveMode(page),
+        onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); },
+      });
     } catch (err) {
       track('ce_send_fail', { game, reason: failReason(err), page, ...refusedAt(err) });
       if (linkDead(err)) await drop();

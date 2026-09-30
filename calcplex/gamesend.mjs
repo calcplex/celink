@@ -4,7 +4,7 @@
 // Sending a game to a TI-84 Plus CE: every file of it, every time, libraries
 // first, after a space check, with each variable read back. The pages own the
 // words on screen; this module owns what goes over the cable.
-import { NAMED, compatibility, digest, isCE, refusal } from './core.mjs';
+import { NAMED, compatibility, digest, isCE, launchesArchived, refusal } from './core.mjs';
 import { CELink } from '../celink.mjs';
 import { parseFile, TYPE } from '../tifiles.mjs';
 
@@ -153,7 +153,11 @@ export function jailbreakTools(rows) {
     .map(t => t.tool);
 }
 
-/** The calculator and its jailbreak tools. A prgmA counts only if it reads back as arTIfiCE. */
+/**
+ * The calculator and its jailbreak tools. A prgmA counts if it reads back as
+ * arTIfiCE, or if the calculator refuses the read (a running program may
+ * refuse it).
+ */
 export async function inspect(openLink) {
   const link = readyEach(openLink);
   const calc = await identify(link);
@@ -164,7 +168,10 @@ export async function inspect(openLink) {
     let real = false;
     try {
       real = await digest((await link.receive('A', a.type)).data) === ARTIFICE_A.sha256;
-    } catch { /* unreadable: not counted */ }
+    } catch (err) {
+      // Refused, not different: a running program may refuse reads.
+      if (err?.code === 'CALC_ERROR') real = true;
+    }
     if (!real) tools = tools.filter(t => t !== 'arTIfiCE');
   }
   return { ...calc, tools };
@@ -187,12 +194,15 @@ const cost = (e, archived) => e.data.length + e.name.length + (archived ? 20 : 9
 
 /**
  * With no I/O: what to delete and send, and whether it fits. `rows` is the
- * calculator's listing; `archive: 'all'` archives every variable.
+ * calculator's listing; `archive` is 'file' (each variable where its file
+ * says), 'programs' (every program archived, the rest where its file says)
+ * or 'all' (every variable archived).
  */
 export function planInstall(entries, { rows, ramFree = null, archiveFree = null, archive = 'file' }) {
   const steps = entries.map(e => {
     const remove = rows.filter(r => clash(r, e));
-    return { entry: e, archived: archive === 'all' || !!e.archived, remove, reason: remove.length ? 'replace' : 'new' };
+    const archived = archive === 'all' || (archive === 'programs' && PROGRAMS.includes(e.type)) || !!e.archived;
+    return { entry: e, archived, remove, reason: remove.length ? 'replace' : 'new' };
   });
   // RAM freed by a delete is back at once, but the delete runs only just
   // before its own file, so RAM is a running balance in send order. Freed
@@ -256,8 +266,11 @@ async function planThatFits(link, todo, calc, archive) {
  *   onProgress(done, total)  bytes across every variable
  *   onStep(step, name)       'delete', 'send' or 'verify'
  *   verify                   'full' reads each variable back; 'size' lists once at the end
- *   archive                  'file' stores each variable where its file says; 'all' archives all
- * Resolves { os, route, asm, sent, replaced, warnings, bytes, rechecked }. A
+ *   archive                  'file' stores each variable where its file says; 'programs' puts
+ *                            every program in archive on an OS that starts archived programs
+ *                            (5.3.0 and later) and stores everything else where its file says,
+ *                            and below 5.3 is 'file'; 'all' archives all
+ * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked }. A
  * failure part way carries `partial`, the names already on the calculator,
  * and `removed`, names deleted whose new copy never landed.
  */
@@ -269,7 +282,8 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   if (asm && (calc.route === 'unsupported' || calc.route === 'unknown')) {
     throw refusal('NO_JAILBREAK', `There's no jailbreak for OS ${calc.os} yet, so this game can't run on it. Nothing was sent.`);
   }
-  const { plan, rechecked } = await planThatFits(link, todo, calc, archive);
+  const mode = archive === 'programs' && !launchesArchived(calc.os) ? 'file' : archive;
+  const { plan, rechecked } = await planThatFits(link, todo, calc, mode);
   const total = plan.steps.reduce((n, s) => n + s.entry.data.length, 0);
   let before = 0;
   const sent = [], replaced = [], removed = new Set();
@@ -301,7 +315,8 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
     err.removed = [...removed];
     throw err;
   }
-  return { os: calc.os, route: calc.route, asm, sent, replaced, warnings: plan.warnings, bytes: total, rechecked };
+  const archived = plan.steps.filter(s => s.archived).map(s => s.entry.name);
+  return { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked };
 }
 
 async function readBack(link, e) {

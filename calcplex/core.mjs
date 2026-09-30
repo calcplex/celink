@@ -78,6 +78,13 @@ export function needsAsm(version) {
   return compatibility(version) === 'native' && Number(version.split('.')[1]) < 3;
 }
 
+/** True on OS 5.3.0 and later, which start archived programs, assembly included, from prgm. */
+export function launchesArchived(version) {
+  if (!/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(version)) return false;
+  const [major, minor] = version.split('.').map(Number);
+  return major === 5 && minor >= 3;
+}
+
 /** How to start the assembly program `name`, as one sentence. */
 export function startHint(version, name) {
   if (compatibility(version) === 'v21') return `Press prgm, run A, and pick ${name}.`;
@@ -239,6 +246,11 @@ export function isChromeOS(nav) {
 
 // Every analytics parameter below is a fixed vocabulary, never the browser's
 // or the library's text: GA4 folds a high-cardinality value into "(other)".
+// Beyond the reasons and calcParams:
+//   choice     ce_jb_prompt, how the jailbreak prompt closed: installer | send_anyway | cancel
+//   jb         ce_calc_info, jailbreakState at connect: none | found | missing | blocked
+//   connected  ce_download, a calculator connected at the click: 1 | 0
+//   screen     ce_step, the installer screen reached, once per screen per page load
 
 export const PREVIEW_HOST = typeof location !== 'undefined' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
@@ -259,8 +271,9 @@ export function trackConnectFail(err, extra = {}) {
 /**
  * `at` for a calculator refusal: the operation and the reply that carried it,
  * e.g. `send_rts`, or `ready_mode_before_send` when the ready step before a
- * send was refused. Nothing for any other error. Error 0x0036 has no known
- * meaning, so where it happens is the first clue to its cause.
+ * send was refused. Nothing for any other error. Where a refusal happens
+ * tells causes apart: 0x0036 at send_rts or delete_delete is a program
+ * running on the calculator.
  */
 export function refusedAt(err) {
   if (err?.code !== 'CALC_ERROR' || !err.op || !err.step) return {};
@@ -274,10 +287,73 @@ export function calcParams({ os, model, home }) {
   return { evo_os: os, evo_hw: model, ...(home === undefined ? {} : { home: home ? 1 : 0 }) };
 }
 
+/**
+ * sendGame's `archive` mode for a page: games (hub, game pages, the
+ * installer) go to archive where the OS starts archived programs, and the
+ * math page's TI-Basic programs stay where their files say.
+ */
+export function archiveMode(page) {
+  return page === 'math' ? 'file' : 'programs';
+}
+
+/** ce_jb_prompt's `choice`: either button by its name, and any other close (Escape, a click outside) as cancel. */
+export function jbPromptChoice(closedWith) {
+  return closedWith === 'installer' || closedWith === 'send_anyway' ? closedWith : 'cancel';
+}
+
+// A download's name as the site gives it: the file name without its folder
+// or extension, e.g. "SnakeCE" for /downloads/ce/SnakeCE.8xg.
+export const downloadName = file => file.split('/').pop().replace(/\.[^.]+$/, '');
+const DOWNLOAD_FILE = /\.(8xg|8xp|8xv|zip)$/i;
+
+/** ce_download's parameters for a click on `file` (a decoded path), or null when it is not a calculator file. */
+export function downloadParams(file, page, connected) {
+  return DOWNLOAD_FILE.test(file) ? { game: downloadName(file), page, connected: connected ? 1 : 0 } : null;
+}
+
+/** The installer's ce_step: the function it returns sends the event the first time each screen shows. */
+export function stepTracker(send = track) {
+  const seen = new Set();
+  return (screen, route) => {
+    if (seen.has(screen)) return;
+    seen.add(screen);
+    send('ce_step', { screen, ...(route && { route }) });
+  };
+}
+
+/**
+ * Transfers that go in order and are retried as a whole: `run()` resumes at
+ * the step that failed, so a step that finished is never sent twice. `next`
+ * is the index `run()` starts at.
+ */
+export function resumable(steps) {
+  let next = 0;
+  return {
+    get next() { return next; },
+    async run() {
+      while (next < steps.length) {
+        await steps[next]();
+        next++;
+      }
+    },
+  };
+}
+
 const LINK_DEAD = [...LINK_LOST, 'LINK_CLOSED'];
 const FILE_CODES = ['BAD_FILE', 'BAD_ENTRY', 'BAD_NAME', 'UNSUPPORTED_TYPE'];
 // "Busy" and "go to the home screen": wait and retry, no need to reconnect.
 const CALC_BUSY = [0x0011, 0x0034];
+
+// Refused while a program runs on the calculator, a shell such as arTIfiCE
+// included. The link survives it, so the same button works once the program
+// is quit. Its reason stays calc_error_54.
+export const PROGRAM_RUNNING = 0x0036;
+export function programRunning(err) {
+  return err?.code === 'CALC_ERROR' && err.calcError === PROGRAM_RUNNING;
+}
+// The key that leaves the arTIfiCE shell.
+export const LEAVE_SHELL_KEY = 'mode'; // observed on hardware: clear does nothing in the arTIfiCE v2.1 shell, mode returns to the home screen
+export const RUNNING_TEXT = "Your calculator is running a program, so it can't take files. Quit the program and go back to the home screen, then try again.";
 
 // Plain words for the calculator's refusals. celink's own messages keep
 // libticalcs' technical wording.
@@ -306,6 +382,7 @@ const REFUSAL_TEXT = {
   0x002F: 'the Flash app was rejected',
   0x0030: 'the Flash app was rejected',
   0x0034: 'the calculator is busy. Go to the home screen and try again',
+  0x0036: 'a program is running on the calculator',
 };
 // The codes whose meaning is clearer when it was an app being written.
 const APP_REFUSAL_TEXT = {
@@ -320,6 +397,7 @@ const APP_REFUSAL_TEXT = {
   0x002F: 'the calculator rejected the app',
   0x0030: 'the calculator rejected the app',
   0x0034: 'the calculator is busy. Go to the home screen and try again',
+  0x0036: 'a program is running on the calculator',
 };
 
 /**
@@ -362,6 +440,23 @@ const PAGE_REASONS = new Map([
 /** The `reason` an analytics event gives any error. */
 export function failReason(err) {
   return linkReason(err) ?? PAGE_REASONS.get(err?.code) ?? 'other';
+}
+
+/**
+ * What a CE download page shows for a failed connect or send. `own` maps a
+ * reason to the page's own sentence. Other errors get the refusal or the
+ * library's message, which says "game"; the math page's things are
+ * programs. The page's own sentences say "game" only where they mean one.
+ */
+export function pageErrorText(err, { page, own = {} } = {}) {
+  const reason = failReason(err);
+  let text = programRunning(err) ? RUNNING_TEXT : Object.hasOwn(own, reason) ? own[reason] : '';
+  if (!text) {
+    const engine = refusalText(err) || err?.message || String(err);
+    text = page === 'math' ? engine.replace(/\bgame\b/g, 'program') : engine;
+  }
+  if (err?.partial?.length || err?.removed?.length) text += ' Press Send again to finish.';
+  return text;
 }
 
 // Where the installer's reasons have always differed from the games pages':

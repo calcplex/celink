@@ -9,9 +9,10 @@
 import { CETransport } from './transport.mjs';
 import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
-  INEQUALZ_URL, OFFICIAL, PREVIEW_HOST, ROUTES, TICONNECT_URL, calcParams, compatibility, esc, fetchOfficial,
-  identifyOfficial, inequalzStatus, installerFailReason, isChromeOS, isWindows, linkDead, needsAsm, officialFiles,
-  parseFlashApp, parseVariable, refusal, refusalText, refusedAt, startHint, track, trackConnectFail, unknownRefusal,
+  INEQUALZ_URL, LEAVE_SHELL_KEY, OFFICIAL, PREVIEW_HOST, ROUTES, RUNNING_TEXT, TICONNECT_URL, archiveMode, calcParams, compatibility, esc,
+  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, isChromeOS, isWindows, linkDead, needsAsm,
+  officialFiles, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable, startHint,
+  stepTracker, track, trackConnectFail, unknownRefusal,
 } from './core.mjs';
 import { CELinkError } from '../celink.mjs';
 
@@ -83,11 +84,11 @@ const WALKS = {
     done: 'The game starts.',
   },
   'ce-jb-v21-run': {
-    alt: 'Running arTIfiCE on a calculator: the prgm menu, prgmA on the home screen, the arTIfiCE shell, then the game running',
+    alt: 'Running arTIfiCE on a calculator: the prgm menu, prgmA on the home screen, arTIfiCE\'s list of games, then the game running',
     steps: [
       'Press <kbd>prgm</kbd>, then press <kbd>enter</kbd> on A. On a Python edition, choose TI-Basic first.',
       'prgmA is on the home screen. Press <kbd>enter</kbd> again.',
-      'The arTIfiCE shell lists your games. Arrow to one and press <kbd>enter</kbd>.',
+      'arTIfiCE lists your games. Arrow to one and press <kbd>enter</kbd>.',
     ],
     done: 'The game starts.',
   },
@@ -148,7 +149,7 @@ function mountWalks() {
 // Every route ends on these two: the games hub and the send-a-program tutorial.
 const gamesActions = () => `
     <div class="cec-actions cec-actions-pair">
-      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${GAMES}">Games for the TI-84 Plus CE</a></div>
+      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${GAMES}">Send more games to your calculator</a></div>
       <div class="wp-block-button"><a class="wp-block-button__link no-border-radius is-secondary" href="${PROGRAMS}" target="_blank" rel="noopener">How to put a game on it</a></div>
     </div>`;
 
@@ -161,7 +162,7 @@ const STEPS = ['Connect', 'Check', 'Install', 'Play'];
 const OUTCOME_TEXT = {
   no_device: 'No calculator was picked. Choose one from the browser list when you are ready.',
   open_failed: 'Another program is using the calculator. Close TI Connect CE and anything else that talks to it, unplug the calculator, plug it back in, then press Connect calculator again.',
-  link_lost: 'The calculator stopped answering. Unplug the USB cable, plug it back in, then choose Start over.',
+  link_lost: 'The calculator stopped answering. If a game is running on it, quit the game and connect again. Otherwise, unplug the USB cable, plug it back in, then choose Start over.',
   low_battery: 'Charge the calculator before installing. Sending an app needs a battery that is not low.',
 };
 // celink's TIMEOUT says what it was waiting for and how long.
@@ -269,6 +270,7 @@ const state = {
   reportedInfo: false,
   lastReason: '',   // the last reason shown, for the report control
   reported: {},     // report choice -> true, so one page load counts each once
+  v21: null,        // arTIfiCE v2.1 then Snake; a retry resumes at the one that failed
 };
 
 function root() { return $('#cec'); }
@@ -292,7 +294,14 @@ function foot() {
   </div>`;
 }
 
-function paint(body, step) {
+// Counts the first time each screen shows in a page load.
+const stepOnce = stepTracker();
+function trackStep(screen) {
+  stepOnce(screen, state.info?.route);
+}
+
+function paint(body, step, screen) {
+  trackStep(screen);
   state.gate = null;
   state.afterWork = null;
   state.step = step;
@@ -336,7 +345,9 @@ function fail(err) {
   if (!el) return;
   const reason = installerFailReason(err);
   state.lastReason = reason;
-  if (onWindows() && WINDOWS_OUTCOME_HTML[reason]) {
+  if (programRunning(err)) {
+    el.textContent = RUNNING_TEXT;
+  } else if (onWindows() && WINDOWS_OUTCOME_HTML[reason]) {
     el.innerHTML = WINDOWS_OUTCOME_HTML[reason];
     const go = el.querySelector('[data-go="install"]');
     if (go) go.onclick = () => { if (!state.busy) viewInstallTIConnect(); };
@@ -395,7 +406,7 @@ function viewWindowsCheck() {
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-have">Yes, it's installed</button></div>
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius is-secondary" id="cec-need">No, or I'm not sure</button></div>
     </div>
-  `, 0);
+  `, 0, 'win_check');
   $('#cec-have').onclick = viewConnect;
   $('#cec-need').onclick = viewInstallTIConnect;
 }
@@ -413,7 +424,7 @@ function viewInstallTIConnect() {
     <div class="cec-actions">
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-installed">It's installed</button></div>
     </div>
-  `, 0);
+  `, 0, 'win_install');
   $('#cec-installed').onclick = viewConnect;
 }
 function viewConnect() {
@@ -435,7 +446,7 @@ function viewConnect() {
     </div>
     <p class="cec-why">Different calculator versions need different jailbreaks. This page reads the version over the cable and picks the right one.</p>
     ${usb ? '' : '<p class="cec-why">Direct USB needs Chrome or Edge on a computer. Manual installation works in any browser.</p>'}
-  `, 0);
+  `, 0, 'connect');
   if (!usb) return;
   $('#cec-go').onclick = () => work(async () => {
     say('Pick your calculator in the browser window that opens.');
@@ -467,7 +478,7 @@ function viewRoute() {
       ? 'Check the About screen on the calculator and connect again.'
       : `<a href="${AUTHOR}" target="_blank" rel="noopener nofollow">The author's page</a> lists every version arTIfiCE covers.`}</p>`}
     ${next ? `<div class="cec-actions"><div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">${next[0]}</button></div></div>` : ''}
-  `, 1);
+  `, 1, `route_${route}`);
   if (next) $('#cec-next').onclick = next[1];
 }
 
@@ -479,7 +490,7 @@ function viewNative() {
     ${sendActions()}
     ${walk(early ? 'ce-jb-native-asm' : 'ce-jb-native-game')}
     ${gamesActions()}
-  `, 1);
+  `, 1, 'native');
   wireSends();
 }
 
@@ -515,7 +526,7 @@ function viewNoInequalz() {
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-send-app" disabled>Send the app</button></div>
     </div>
     <p class="cec-why">arTIfiCE v3 installs through TI's Inequality Graphing app, Inequalz. Your calculator doesn't have it installed. If you would rather send it with TI Connect CE, do that, then press Start over.</p>
-  `, 2);
+  `, 2, 'no_inequalz');
   state.pickedApp = null;
   state.afterWork = () => {
     const b = $('#cec-send-app');
@@ -571,7 +582,7 @@ function viewInequalzUnsure() {
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">Inequalz is on the calculator</button></div>
       <button type="button" id="cec-recheck" class="cec-plain">Check again</button>
     </div>
-  `, 2);
+  `, 2, 'inequalz_unsure');
   $('#cec-next').onclick = viewV3Reset;
   $('#cec-recheck').onclick = () => work(() => confirmInequalz('The calculator still did not list its apps. Carry on from the apps menu if you can see Inequalz there.'));
 }
@@ -585,14 +596,14 @@ function viewV3Reset() {
     ${walk('ce-jb-reset-ram')}
     <div class="cec-actions"><div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">The RAM is cleared</button></div></div>
     <p class="cec-why">arTIfiCE v3 needs a clear RAM to install.</p>
-  `, 2);
+  `, 2, 'v3_reset');
   $('#cec-next').onclick = viewV3Installer;
 }
 
 // One file per screen: the two v3 files go at different moments, and showing
 // both would invite "send both now". The file list, the release page and the
 // picker are a fallback, shown only when this site's copy fails to load.
-function filesScreen({ files, heading, lead = '', action, tag, step, onSend, before = '', after = '', gate = null }) {
+function filesScreen({ files, heading, lead = '', action, tag, step, screen, onSend, before = '', after = '', gate = null }) {
   paint(`
     <h2>${heading}</h2>
     ${lead ? `<p class="cec-sub">${lead}</p>` : ''}
@@ -612,7 +623,7 @@ function filesScreen({ files, heading, lead = '', action, tag, step, onSend, bef
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next" disabled>${action}</button></div>
     </div>
     ${after}
-  `, step);
+  `, step, screen);
   state.screenFiles = files;
   state.gate = gate;
   state.afterWork = renderPicked;
@@ -665,37 +676,66 @@ function renderPicked() {
     && (state.gate ? state.gate() : true));
 }
 
+// Snake goes with arTIfiCE, so the shell has a game to list the first time it
+// runs, and nothing is running on the calculator while either one is sent.
 function viewFilesV21() {
+  state.v21 = resumable([sendArtificeV21, () => sendGameTo(GAME)]);
   filesScreen({
     files: OFFICIAL.v21.files,
     tag: OFFICIAL.v21.tag,
     step: 2,
-    heading: 'Send arTIfiCE v2.1',
-    action: 'Send arTIfiCE v2.1',
-    after: '<p class="cec-why">One program, named A. That is the whole install for this version.</p>',
+    screen: 'files_v21',
+    heading: 'Send arTIfiCE v2.1 and Snake',
+    action: 'Send arTIfiCE and Snake',
+    after: '<p class="cec-why">arTIfiCE is a jailbreak program that lets your calculator run games. We\'ll send Snake along with it, so you have a game to run.</p>',
     onSend: sendV21,
   });
 }
 
+async function sendArtificeV21() {
+  const { bytes, spec } = state.picked[OFFICIAL.v21.files[0].file];
+  say('Sending.');
+  await tracked('ARTIFICE_V21', () => transport.sendVerified(bytes, { official: spec }));
+}
+
 function sendV21() {
   work(async () => {
-    const { bytes, spec } = state.picked[OFFICIAL.v21.files[0].file];
-    say('Sending.');
-    await tracked('ARTIFICE_V21', () => transport.sendVerified(bytes, { official: spec }));
+    try {
+      await state.v21.run();
+    } catch (err) {
+      if (state.v21.next > 0) offerSkip(); // arTIfiCE landed, Snake did not
+      throw err;
+    }
     say('');
-    viewV21Run();
+    viewV21Run({ snake: true });
   });
 }
 
-function viewV21Run() {
+// arTIfiCE landed and Snake did not: the screen says so, the button retries
+// Snake alone, and the jailbreak can go on without it.
+function offerSkip() {
+  const next = $('#cec-next');
+  if (!next || $('#cec-skip')) return;
+  const heading = root().querySelector('.cec-card h2');
+  heading.textContent = `Send ${GAME.label}`;
+  heading.insertAdjacentHTML('afterend', '<p class="cec-sub">arTIfiCE is on the calculator as program A.</p>');
+  next.textContent = `Send ${GAME.label}`;
+  next.closest('.cec-actions').insertAdjacentHTML('beforeend', `<button type="button" id="cec-skip" class="cec-plain">Go on without ${GAME.label}</button>`);
+  $('#cec-skip').onclick = () => { if (!state.busy) viewV21Run({ snake: false }); };
+}
+
+// Without Snake the shell would open to an empty list, and a game sent while
+// it is open is refused, so a game goes on first.
+function viewV21Run({ snake }) {
   paint(`
     <h2>Run arTIfiCE</h2>
-    <p class="cec-sub">arTIfiCE is on the calculator as program A.</p>
+    <p class="cec-sub">${snake ? `arTIfiCE and ${GAME.label} are on the calculator.` : 'arTIfiCE is on the calculator as program A.'}</p>
+    ${snake ? '' : `<p>Put a game on the calculator before you run A. Send ${GAME.label} here, or pick one from the games page.</p>${sendActions()}`}
     ${walk('ce-jb-v21-run')}
-    <p>Whenever you want to play: <kbd>prgm</kbd>, run A, pick the game. <kbd>mode</kbd> leaves the shell.</p>
-    <div class="cec-actions"><div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">Done</button></div></div>
-  `, 2);
-  $('#cec-next').onclick = viewPlay;
+    <p>Whenever you want to play: <kbd>prgm</kbd>, run A, pick the game. Press <kbd>${LEAVE_SHELL_KEY}</kbd> to leave arTIfiCE.</p>
+    ${gamesActions()}
+  `, 3, snake ? 'v21_run' : 'v21_run_nosnake');
+  if (!snake) wireSends();
 }
 
 function viewV3Installer() {
@@ -703,6 +743,7 @@ function viewV3Installer() {
     files: [OFFICIAL.v3.files[0]],
     tag: OFFICIAL.v3.tag,
     step: 2,
+    screen: 'v3_installer',
     heading: 'Send the installer program',
     action: 'Send arTIfiCE.8xp',
     after: '<p class="cec-why">File 1 of 2. The trigger comes next, once Inequalz is open.</p>',
@@ -731,6 +772,7 @@ function viewV3Inequalz() {
     files: [trigger],
     tag: OFFICIAL.v3.tag,
     step: 2,
+    screen: 'v3_inequalz',
     heading: 'Open Inequalz, then send the trigger',
     lead: 'The installer program is on the calculator.',
     action: 'Send the trigger',
@@ -765,7 +807,7 @@ function viewV3Finish() {
     ${walk('ce-jb-v3-asmhook')}
     <div class="cec-actions"><div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">Done</button></div></div>
     <p class="cec-why"><strong>Good to know.</strong> You only need to launch AsmHook2 once; it stays through restarts. After a RAM reset, launch it again. If Inequalz later reports CONFLICTING APPS, choose option 2, then launch AsmHook2 again after leaving it.</p>
-  `, 2);
+  `, 2, 'v3_finish');
   $('#cec-next').onclick = viewPlay;
 }
 
@@ -782,32 +824,41 @@ async function gameLink() {
   }
   return playLink;
 }
+// Send `game`, archived where the OS starts archived programs. Resolves
+// sendGame's result.
+async function sendGameTo(game) {
+  let link = null;
+  try {
+    link = await gameLink();
+    say(`Getting ${game.label}.`);
+    const response = await fetch(game.file);
+    if (!response.ok) throw refusal('FETCH', `${game.label} could not be downloaded from this site. Try again in a moment.`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    say(`Sending ${game.label}. Leave the cable alone until it finishes.`);
+    const r = await sendGame(link, [bytes], {
+      archive: archiveMode('installer'),
+      onProgress: (done, total) => { if (total) say(`Sending ${game.label}. Leave the cable alone until it finishes. ${Math.min(99, Math.round(done / total * 100))}%`); },
+    });
+    const outcome = r.replaced.length ? 'replaced' : 'sent';
+    track('ce_send_success', { game: game.name, outcome, route: r.route, page: 'installer' });
+    return r;
+  } catch (err) {
+    // A dead link is dropped for good: the next click picks again.
+    if (linkDead(err)) {
+      if (link === transport.link) transport.poisoned = true;
+      playLink = null;
+    }
+    track('ce_send_fail', { game: game.name, reason: installerFailReason(err), ...refusedAt(err) });
+    throw err;
+  }
+}
+// The Play screens' button. Once the game is there, how to start it comes
+// into view.
 function sendGameButton(game) {
   work(async () => {
-    let link = null;
-    try {
-      link = await gameLink();
-      say(`Getting ${game.label}.`);
-      const response = await fetch(game.file);
-      if (!response.ok) throw refusal('FETCH', `${game.label} could not be downloaded from this site. Try again in a moment.`);
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      say(`Sending ${game.label}. Leave the cable alone until it finishes.`);
-      const r = await sendGame(link, [bytes], {
-        onProgress: (done, total) => { if (total) say(`Sending ${game.label}. Leave the cable alone until it finishes. ${Math.min(99, Math.round(done / total * 100))}%`); },
-      });
-      const outcome = r.replaced.length ? 'replaced' : 'sent';
-      track('ce_send_success', { game: game.name, outcome, route: r.route, page: 'installer' });
-      const how = startHint(String(state.info?.os || r.os), game.name);
-      say(`${game.label} is on the calculator. ${how}`);
-    } catch (err) {
-      // A dead link is dropped for good: the next click picks again.
-      if (linkDead(err)) {
-        if (link === transport.link) transport.poisoned = true;
-        playLink = null;
-      }
-      track('ce_send_fail', { game: game.name, reason: installerFailReason(err), ...refusedAt(err) });
-      throw err;
-    }
+    const r = await sendGameTo(game);
+    say(`${game.label} is on the calculator. ${startHint(String(state.info?.os || r.os), game.name)}`);
+    $('#cec-howto')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
 }
 const sendActions = () => `
@@ -816,14 +867,16 @@ function wireSends() {
   $(`#${GAME.id}`).onclick = () => sendGameButton(GAME);
 }
 
+// The v3 route's last screen (v2.1 sends Snake with arTIfiCE). The button
+// comes first, how to start a game under it.
 function viewPlay() {
   paint(`
     <h2>Put a game on it</h2>
-    <p class="cec-sub">Send Snake to see it work. ${state.info?.route === 'v21' ? 'Games start from the arTIfiCE shell: <kbd>prgm</kbd>, run A, pick the game.' : 'Games start from the <kbd>prgm</kbd> menu.'}</p>
+    <p class="cec-sub">Send Snake to see it work.</p>
     ${sendActions()}
-    ${state.info?.route === 'v21' ? '' : walk('ce-jb-v3-game')}
+    <div id="cec-howto"><p>Games start from the <kbd>prgm</kbd> menu.</p>${walk('ce-jb-v3-game')}</div>
     ${gamesActions()}
-  `, 3);
+  `, 3, 'play');
   wireSends();
   // A CE has no USB serial number, so after the v3 restart the browser no
   // longer knows it (observed on hardware on 5.8.5).
@@ -831,6 +884,7 @@ function viewPlay() {
 }
 
 function unavailable(message) {
+  trackStep('no_webusb');
   root().innerHTML = `<section class="cec-card"><h2>This page needs Chrome or Edge</h2>
     <p>${esc(message)}</p>
     <div class="cec-actions"><div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${WRITTEN}"${writtenAttrs()}>Manual installation</a></div></div></section>`;
@@ -852,14 +906,14 @@ const PREVIEW_SCREENS = {
   native: ['5.3.0.0037', viewNative],
   'native-50': ['5.0.0.0089', viewNative],
   'files-v21': ['5.8.4.0058', viewFilesV21],
-  'v21-run': ['5.8.4.0058', viewV21Run],
+  'v21-run': ['5.8.4.0058', () => viewV21Run({ snake: true })],
+  'v21-run-nosnake': ['5.8.4.0058', () => viewV21Run({ snake: false })],
   'no-inequalz': ['5.8.5', viewNoInequalz],
   'inequalz-unsure': ['5.8.5', viewInequalzUnsure],
   'v3-reset': ['5.8.5', viewV3Reset],
   'v3-installer': ['5.8.5', viewV3Installer],
   'v3-inequalz': ['5.8.5', viewV3Inequalz],
   'v3-finish': ['5.8.5', viewV3Finish],
-  play: ['5.8.4.0058', viewPlay],
   'play-v3': ['5.8.5', viewPlay],
 };
 function installPreview() {

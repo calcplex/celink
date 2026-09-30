@@ -4,9 +4,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  OFFICIAL, ROUTES, calcParams, checkCalculator, compatibility, digest, esc, failReason, fetchOfficial, identifyOfficial, inequalzStatus,
-  installerFailReason, isCE, isChromeOS, isWindows, linkDead, linkReason, needsAsm, officialFiles, openDetail, parseFlashApp,
-  parseVariable, refusalText, refusedAt, sameVariable, startHint, unknownRefusal,
+  LEAVE_SHELL_KEY, OFFICIAL, ROUTES, RUNNING_TEXT, archiveMode, calcParams, checkCalculator, compatibility, digest,
+  downloadParams, esc, failReason, fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, isCE,
+  isChromeOS, isWindows, jbPromptChoice, launchesArchived, linkDead, linkReason, needsAsm, officialFiles, openDetail,
+  pageErrorText, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable,
+  sameVariable, startHint, stepTracker, unknownRefusal,
 } from '../core.mjs';
 import { CELinkError } from '../../celink.mjs';
 import { TYPE } from '../../tifiles.mjs';
@@ -270,7 +272,7 @@ test('refusalText: a sentence for each refusal, in an app\'s terms when an app w
   assert.equal(refusalText({ code: 'CALC_ERROR', calcError: 0x0011, op: 'ready', readying: 'sendApp' }),
     'The calculator refused the app (error 0x0011: the calculator is busy. Go to the home screen and try again).');
   assert.match(refusalText({ code: 'CALC_ERROR', calcError: 0x0011, op: 'ready', readying: 'send' }), /^The calculator refused the request/);
-  assert.equal(refused(0x0036), 'The calculator refused the request (error 0x0036: an error code this library does not know; please report it).');
+  assert.equal(refused(0x0037), 'The calculator refused the request (error 0x0037: an error code this library does not know; please report it).');
   assert.equal(refusalText({ code: 'TIMEOUT' }), undefined);
 });
 
@@ -302,4 +304,119 @@ test('calcParams reports the home screen as 1 or 0, and leaves it out when unkno
   assert.deepEqual(calcParams({ os: '5.8.4.0058', model: 'TI-84 Plus CE', home: true }), { evo_os: '5.8.4.0058', evo_hw: 'TI-84 Plus CE', home: 1 });
   assert.equal(calcParams({ os: '5.3.0.0037', model: 'TI-84 Plus CE', home: false }).home, 0);
   assert.equal('home' in calcParams({ os: '5.3.0.0037', model: 'TI-84 Plus CE' }), false);
+});
+
+test('launchesArchived: 5.3.0 and later start archived programs; anything else keeps the file\'s flag', () => {
+  const cases = {
+    '5.0.0.0089': false, '5.2.2.0001': false, '5.3.0.0037': true, '5.4.0.0034': true, '5.8.4.0058': true, '5.8.5.0074': true,
+    '5.8.5': true, '6.0.0': false, '7.0.0.3996': false, nonsense: false, '': false, '5.3': false,
+  };
+  for (const [version, want] of Object.entries(cases)) assert.equal(launchesArchived(version), want, version);
+  assert.equal(launchesArchived(undefined), false);
+});
+
+test('programRunning: error 0x0036 wherever it comes, and nothing else', () => {
+  const refused = (calcError, extra) => new CELinkError('CALC_ERROR', 'refused', { calcError, ...extra });
+  for (const extra of [{ op: 'send', step: 'rts' }, { op: 'delete', step: 'delete' }, { op: 'ready', step: 'mode' }, {}]) {
+    assert.equal(programRunning(refused(0x0036, extra)), true, JSON.stringify(extra));
+  }
+  for (const err of [refused(0x0034), refused(0x0011), new CELinkError('TIMEOUT', 'no reply'), { code: 'TIMEOUT', calcError: 0x0036 }, undefined, null]) {
+    assert.equal(programRunning(err), false, String(err?.code));
+  }
+});
+
+test('a running program keeps its analytics: reason calc_error_54, not calc_busy, and where it was refused', () => {
+  const rts = new CELinkError('CALC_ERROR', 'refused', { calcError: 0x0036, op: 'send', step: 'rts' });
+  const del = new CELinkError('CALC_ERROR', 'refused', { calcError: 0x0036, op: 'delete', step: 'delete' });
+  for (const err of [rts, del]) {
+    assert.equal(failReason(err), 'calc_error_54');
+    assert.equal(installerFailReason(err), 'calc_error_54');
+    assert.notEqual(linkReason(err), 'calc_busy');
+  }
+  assert.deepEqual(refusedAt(rts), { at: 'send_rts' });
+  assert.deepEqual(refusedAt(del), { at: 'delete_delete' });
+});
+
+test('the running-program words: plain, the same on every route, the shell key only on the installer', () => {
+  assert.match(refusalText({ code: 'CALC_ERROR', calcError: 0x0036, op: 'send' }), /a program is running on the calculator/);
+  assert.match(refusalText({ code: 'CALC_ERROR', calcError: 0x0036, op: 'sendApp' }), /^The calculator refused the app .*a program is running/);
+  assert.equal(RUNNING_TEXT, "Your calculator is running a program, so it can't take files. Quit the program and go back to the home screen, then try again.");
+  assert.equal(LEAVE_SHELL_KEY, 'mode');
+  assert.doesNotMatch(RUNNING_TEXT, /\u2014|\u2013|arTIfiCE|\bclear\b|\bmode\b/);
+});
+
+test('archive mode by page: games archive, the math page keeps its files\' flags', () => {
+  for (const page of ['hub', 'game', 'installer']) assert.equal(archiveMode(page), 'programs');
+  assert.equal(archiveMode('math'), 'file');
+});
+
+test('the jailbreak prompt reports a fixed choice: its two buttons, anything else is cancel', () => {
+  assert.equal(jbPromptChoice('installer'), 'installer');
+  assert.equal(jbPromptChoice('send_anyway'), 'send_anyway');
+  for (const closed of [false, undefined, null, '', 'Escape']) assert.equal(jbPromptChoice(closed), 'cancel');
+});
+
+test('ce_download: the site file name, the page, and connected as 1 or 0; other links send nothing', () => {
+  assert.deepEqual(downloadParams('/downloads/ce/SnakeCE.8xg', 'hub', true), { game: 'SnakeCE', page: 'hub', connected: 1 });
+  assert.deepEqual(downloadParams('/downloads/ce/Geometry Dash.zip', 'game', null), { game: 'Geometry Dash', page: 'game', connected: 0 });
+  assert.deepEqual(downloadParams('/downloads/ce/DISTANCE.8xp', 'math', undefined), { game: 'DISTANCE', page: 'math', connected: 0 });
+  assert.equal(downloadParams('/downloads/ce/clibs.8XV', 'hub', false).game, 'clibs');
+  assert.equal(downloadParams('/downloads/ce/readme.txt', 'game', true), null);
+  assert.equal(downloadParams('/downloads/ce/', 'hub', true), null);
+});
+
+test('ce_step fires once per screen, with the route only once it is known', () => {
+  const sent = [];
+  const step = stepTracker((event, params) => sent.push([event, params]));
+  step('connect');
+  step('connect');
+  step('route_v21', 'v21');
+  step('files_v21', 'v21');
+  step('route_v21', 'v21');
+  step('connect', 'v21');
+  assert.deepEqual(sent, [
+    ['ce_step', { screen: 'connect' }],
+    ['ce_step', { screen: 'route_v21', route: 'v21' }],
+    ['ce_step', { screen: 'files_v21', route: 'v21' }],
+  ]);
+  // A second tracker (a new page load) counts again.
+  const again = [];
+  stepTracker((e, p) => again.push(p))('connect');
+  assert.equal(again.length, 1);
+});
+
+test('resumable: a retry after the second step fails never repeats the first', async () => {
+  const calls = [];
+  let gameFails = 1;
+  const seq = resumable([
+    async () => { calls.push('A'); },
+    async () => { calls.push('SNAKE'); if (gameFails-- > 0) throw refusal('NO_ARCHIVE_SPACE', 'full'); },
+  ]);
+  assert.equal(seq.next, 0);
+  await assert.rejects(seq.run(), { code: 'NO_ARCHIVE_SPACE' });
+  assert.equal(seq.next, 1, 'the first step landed');
+  await seq.run();
+  assert.deepEqual(calls, ['A', 'SNAKE', 'SNAKE']);
+  assert.equal(seq.next, 2);
+  await seq.run();
+  assert.deepEqual(calls, ['A', 'SNAKE', 'SNAKE'], 'a finished sequence sends nothing more');
+
+  const first = resumable([async () => { throw refusal('FETCH', 'no'); }, async () => calls.push('never')]);
+  await assert.rejects(first.run());
+  assert.equal(first.next, 0, 'nothing landed, so the page offers no skip');
+});
+
+test('page error text: a running program wins on every page, the page words by reason, the math page says program', () => {
+  const running = new CELinkError('CALC_ERROR', 'refused', { calcError: 0x0036, op: 'send', step: 'rts' });
+  const own = { no_device: 'Not in the list?', calc_error_54: 'never shown' };
+  for (const page of ['hub', 'game', 'math']) assert.equal(pageErrorText(running, { page, own }), RUNNING_TEXT);
+  assert.equal(pageErrorText(new CELinkError('NO_DEVICE_SELECTED', 'none'), { page: 'hub', own }), 'Not in the list?');
+  const full = refusal('NO_ARCHIVE_SPACE', 'This game needs 40 KB of archive.');
+  assert.equal(pageErrorText(full, { page: 'game', own }), 'This game needs 40 KB of archive.');
+  assert.equal(pageErrorText(full, { page: 'math', own }), 'This program needs 40 KB of archive.');
+  const other = new CELinkError('CALC_ERROR', 'refused', { calcError: 0x0006, op: 'send', step: 'rts' });
+  assert.equal(pageErrorText(other, { page: 'hub' }), refusalText(other));
+  const partial = refusal('NO_RAM_SPACE', 'Out of RAM.', { partial: ['clibs'] });
+  assert.equal(pageErrorText(partial, { page: 'hub', own }), 'Out of RAM. Press Send again to finish.');
+  assert.equal(pageErrorText(running, { page: 'hub' }), RUNNING_TEXT, 'no table needed');
 });
