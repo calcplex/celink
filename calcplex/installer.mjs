@@ -10,8 +10,8 @@ import { CETransport } from './transport.mjs';
 import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
   INEQUALZ_URL, LEAVE_SHELL_KEY, OFFICIAL, PREVIEW_HOST, ROUTES, RUNNING_TEXT, TICONNECT_URL, archiveMode, calcParams, compatibility, esc,
-  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, isChromeOS, isWindows, linkDead, needsAsm,
-  officialFiles, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable, startHint,
+  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, isChromeOS, isWindows, keyHelpHtml, linkDead, mountKeyHelp,
+  needsAsm, officialFiles, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable, startHint,
   stepTracker, track, trackConnectFail, unknownRefusal,
 } from './core.mjs';
 import { CELinkError } from '../celink.mjs';
@@ -26,7 +26,6 @@ const GAMES = '/downloads/ti84plusce/games/';
 // The game the Play screen sends: one assembly program, no C libraries.
 // `name` is the variable inside the file.
 const GAME = { id: 'cec-snake', label: 'Snake', file: '/downloads/ce/SnakeCE.8xg', name: 'SNAKE' };
-const PROGRAMS = '/ti84plusce-programs-tutorial/';
 const ARCHIVING = 'https://education.ti.com/en/customer-support/knowledge-base/ti-83-84-plus-family/product-usage/34936';
 // Walkthroughs: a numbered list of key presses over emulator screenshots,
 // stepped by the reader (nothing animates). Frame i is the screen step i
@@ -99,26 +98,31 @@ const frameUrl = (name, i) => `/images/evo/${name}-${i}.png`;
 const CHEVRON_LEFT = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M9 2 4 7l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const CHEVRON_RIGHT = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M5 2l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-// Step HTML is trusted (it carries <kbd>); the alt is escaped.
+// Step HTML is trusted (it carries <kbd>); the alt is escaped. The result is
+// numbered like the steps. Each row carries a chevron so it reads as
+// something to click, and a labelled Next sits under the picture.
 const walk = name => {
   const w = WALKS[name];
+  const n = walkEntries(w).length;
   return `
   <div class="cec-walk" data-walk="${name}">
     <ol class="cec-walk-steps">${walkEntries(w).map((step, i) => `
-      <li class="${i === 0 ? 'is-now' : ''}${i === w.steps.length ? ' cec-walk-done' : ''}"><button type="button" data-go="${i}"><span>${step}</span></button></li>`).join('')}
+      <li${i === 0 ? ' class="is-now"' : ''}><button type="button" data-go="${i}"><span>${step}</span><span class="cec-walk-go" aria-hidden="true">${CHEVRON_RIGHT}</span></button></li>`).join('')}
     </ol>
     <figure class="cec-walk-pic">
-      <button type="button" class="cec-walk-arrow" data-step="-1" aria-label="Previous step" disabled>${CHEVRON_LEFT}</button>
       <img src="${frameUrl(name, 0)}" alt="${esc(w.alt)}" width="320" height="240" decoding="async">
-      <button type="button" class="cec-walk-arrow" data-step="1" aria-label="Next step">${CHEVRON_RIGHT}</button>
     </figure>
-    <p class="cec-walk-count">Step 1 of ${w.steps.length}</p>
+    <div class="cec-walk-nav">
+      <button type="button" class="cec-walk-arrow" aria-label="Previous step" disabled>${CHEVRON_LEFT}</button>
+      <p class="cec-walk-count">Step 1 of ${n}</p>
+      <button type="button" class="cec-walk-next" aria-label="Next step">Next ${CHEVRON_RIGHT}</button>
+    </div>
   </div>`;
 };
 
-// Arrows step by one, a list item jumps to its step, a click on the picture
-// advances. Frames are preloaded so stepping never flashes. `_sync` restores
-// the arrows after work() has re-enabled every button.
+// Back and Next step by one, a list item jumps to its step, a click on the
+// picture advances. Frames are preloaded so stepping never flashes. `_sync`
+// restores Back and Next after work() has re-enabled every button.
 function mountWalks() {
   root().querySelectorAll('.cec-walk').forEach(el => {
     const name = el.dataset.walk;
@@ -128,15 +132,21 @@ function mountWalks() {
     const img = el.querySelector('.cec-walk-pic img');
     const items = el.querySelectorAll('.cec-walk-steps li');
     const count = el.querySelector('.cec-walk-count');
-    const [back, next] = el.querySelectorAll('.cec-walk-arrow');
+    const back = el.querySelector('.cec-walk-arrow');
+    const next = el.querySelector('.cec-walk-next');
     let at = 0;
+    // A button that disables itself while focused would drop keyboard focus
+    // to the page, so focus moves to the other one.
     const show = i => {
       at = Math.max(0, Math.min(n - 1, i));
       img.src = frameUrl(name, at);
       items.forEach((li, k) => li.classList.toggle('is-now', k === at));
-      count.textContent = at < w.steps.length ? `Step ${at + 1} of ${w.steps.length}` : 'Result';
+      count.textContent = `Step ${at + 1} of ${n}`;
+      const focused = document.activeElement;
       back.disabled = at === 0;
       next.disabled = at === n - 1;
+      if (focused === next && next.disabled) back.focus();
+      else if (focused === back && back.disabled) next.focus();
     };
     back.onclick = () => show(at - 1);
     next.onclick = () => show(at + 1);
@@ -146,11 +156,11 @@ function mountWalks() {
   });
 }
 
-// Every route ends on these two: the games hub and the send-a-program tutorial.
+// Every route ends on the games hub, in this tab: the page lets go of the
+// calculator on leaving, so the hub can open it.
 const gamesActions = () => `
-    <div class="cec-actions cec-actions-pair">
+    <div class="cec-actions">
       <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${GAMES}">Send more games to your calculator</a></div>
-      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius is-secondary" href="${PROGRAMS}" target="_blank" rel="noopener">How to put a game on it</a></div>
     </div>`;
 
 const $ = s => document.querySelector(s);
@@ -211,13 +221,15 @@ function reportFix(choice) {
   if (choice === 'froze') return li([
     'Unplug the cable, give the calculator a few seconds, then press Start over below.',
     'Still frozen? Press the reset button on the back of the calculator. It clears RAM: archived programs are safe, the rest are erased.',
-    'With arTIfiCE v3 the calculator restarts by itself when the jailbreak installs. That part is normal.',
+    // Only v3 restarts the calculator; before a connect the route is not known.
+    (!i || i.route === 'v3') && 'With arTIfiCE v3 the calculator restarts by itself when the jailbreak installs. That part is normal.',
     manual('If it keeps happening, try the'),
   ]);
   if (choice === 'wont_start') return li([
     i ? esc(startHint(i.os, 'the game')) : 'Start games the way the Play step shows for your calculator.',
     i && i.route === 'v3' && 'After a RAM reset, launch AsmHook2 again from <kbd>apps</kbd>.',
-    'If the calculator mentions LibLoad or libraries, send the game\'s whole download from our games page again. Each one carries the libraries it needs.',
+    // Same tab: this page lets go of the calculator on leaving, so the games page can open it.
+    `If the calculator mentions LibLoad or libraries, send the game again from <a href="${GAMES}">our games page</a>.`,
   ]);
   return li([manual('Try the')]);
 }
@@ -300,12 +312,18 @@ function trackStep(screen) {
   stepOnce(screen, state.info?.route);
 }
 
+// The prgm key's picture box, one per page, mounted in boot().
+let keyHelp = null;
+
+// A key (or the prgm key help) and the punctuation after it stay on one line.
+const keepKeyPunctuation = html => html.replace(/(?:<kbd>[^<]*<\/kbd>|<button type="button" class="cec-keyhelp"[^>]*>(?:[^<]|<(?!\/button>))*<\/button>)[.,:;)]+/g, m => `<span class="cec-nobr">${m}</span>`);
+
 function paint(body, step, screen) {
   trackStep(screen);
   state.gate = null;
   state.afterWork = null;
   state.step = step;
-  root().innerHTML = `${progress()}<section class="cec-card">${body}
+  root().innerHTML = `${progress()}<section class="cec-card">${keepKeyPunctuation(body)}
     <p class="cec-status" role="status" aria-live="polite" id="cec-status"></p>
     <div class="cec-error" role="alert" id="cec-error" hidden></div>
     ${foot()}</section>`;
@@ -323,6 +341,7 @@ function paint(body, step, screen) {
   mountWalks();
   const heading = root().querySelector('h2');
   if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
+  keyHelp?.refresh();
 }
 
 // On Windows, no_device is usually an empty picker (no TI Connect CE driver)
@@ -438,7 +457,7 @@ function viewConnect() {
         <li>Plug the CE into this computer with its charging cable and turn it on.</li>
         ${win
           ? `<li><strong>Close TI Connect CE.</strong> This page can't reach the calculator while it's open.</li>`
-          : onChromeOS() ? '' : `<li>Quit TI Connect CE if it is open.</li>`}
+          : onChromeOS() ? '' : `<li>Quit TI Connect CE if it is open on your computer.</li>`}
       </ol>
     </div>
     <div class="cec-actions">
@@ -484,11 +503,12 @@ function viewRoute() {
 
 function viewNative() {
   const early = needsAsm(state.info.os);
+  const lead = early ? `Games start with Asm(, then the ${keyHelpHtml('cec')} menu.` : `Games start from the ${keyHelpHtml('cec')} menu.`;
   paint(`
     <h2>${ROUTES.native.heading}</h2>
     <p class="cec-sub">Games already run on OS ${esc(state.info.os)}.</p>
     ${sendActions()}
-    ${walk(early ? 'ce-jb-native-asm' : 'ce-jb-native-game')}
+    <div id="cec-howto"><p>${lead}</p>${walk(early ? 'ce-jb-native-asm' : 'ce-jb-native-game')}</div>
     ${gamesActions()}
   `, 1, 'native');
   wireSends();
@@ -513,8 +533,8 @@ function viewNoInequalz() {
     <h2>First, install Inequality Graphing on your calculator</h2>
     <div class="cec-do">
       <ol>
-        <li><strong>Download the app from TI</strong> with the button below. The file ends in <code>.8ek</code>.</li>
-        <li><strong>Click Choose File</strong>, pick the file you downloaded, then click Send the app.</li>
+        <li><strong>Click Get Inequality Graphing from TI</strong> and download the app from TI's page. The file ends in <code>.8ek</code> and usually lands in your Downloads folder.</li>
+        <li><strong>Come back to this tab and click Choose File.</strong> Pick the <code>.8ek</code> file you downloaded, then click Send the app.</li>
       </ol>
     </div>
     <div class="cec-actions" style="margin-bottom:18px">
@@ -525,7 +545,7 @@ function viewNoInequalz() {
     <div class="cec-actions">
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-send-app" disabled>Send the app</button></div>
     </div>
-    <p class="cec-why">arTIfiCE v3 installs through TI's Inequality Graphing app, Inequalz. Your calculator doesn't have it installed. If you would rather send it with TI Connect CE, do that, then press Start over.</p>
+    <p class="cec-why">arTIfiCE v3 installs through TI's Inequality Graphing app, Inequalz. Your calculator doesn't have it installed.</p>
   `, 2, 'no_inequalz');
   state.pickedApp = null;
   state.afterWork = () => {
@@ -603,7 +623,9 @@ function viewV3Reset() {
 // One file per screen: the two v3 files go at different moments, and showing
 // both would invite "send both now". The file list, the release page and the
 // picker are a fallback, shown only when this site's copy fails to load.
-function filesScreen({ files, heading, lead = '', action, tag, step, screen, onSend, before = '', after = '', gate = null }) {
+// `also` goes in the button's row, after it, so the status and error bands
+// still come after both.
+function filesScreen({ files, heading, lead = '', action, also = '', tag, step, screen, onSend, before = '', after = '', gate = null }) {
   paint(`
     <h2>${heading}</h2>
     ${lead ? `<p class="cec-sub">${lead}</p>` : ''}
@@ -620,7 +642,7 @@ function filesScreen({ files, heading, lead = '', action, tag, step, screen, onS
         <input type="file" id="cec-pick" accept=".8xp,.8xv"></label>
     </div>
     <div class="cec-actions">
-      <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next" disabled>${action}</button></div>
+      <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next" disabled>${action}</button></div>${also}
     </div>
     ${after}
   `, step, screen);
@@ -671,9 +693,9 @@ function renderPicked() {
     li.classList.toggle('is-ready', ready);
     if (ready) li.querySelector('.cec-state').textContent = 'ready';
   });
-  const next = $('#cec-next');
-  if (next) next.disabled = !(files.length && files.every(f => state.picked[f.file])
-    && (state.gate ? state.gate() : true));
+  const ready = files.length && files.every(f => state.picked[f.file]) && (state.gate ? state.gate() : true);
+  // The send button, and Send only arTIfiCE where the screen has it.
+  document.querySelectorAll('#cec-next, #cec-only').forEach(b => { b.disabled = !ready; });
 }
 
 // Snake goes with arTIfiCE, so the shell has a game to list the first time it
@@ -687,9 +709,11 @@ function viewFilesV21() {
     screen: 'files_v21',
     heading: 'Send arTIfiCE v2.1 and Snake',
     action: 'Send arTIfiCE and Snake',
+    also: '<button type="button" id="cec-only" class="cec-plain cec-alt" disabled>Send only arTIfiCE</button>',
     after: '<p class="cec-why">arTIfiCE is a jailbreak program that lets your calculator run games. We\'ll send Snake along with it, so you have a game to run.</p>',
     onSend: sendV21,
   });
+  $('#cec-only').onclick = sendV21Only;
 }
 
 async function sendArtificeV21() {
@@ -698,8 +722,23 @@ async function sendArtificeV21() {
   await tracked('ARTIFICE_V21', () => transport.sendVerified(bytes, { official: spec }));
 }
 
+// arTIfiCE alone, for someone who does not want Snake. It lands on the Run
+// screen a skipped Snake leads to, which asks for a game before A runs.
+// Both choices count their click as ce_step before the send (files_v21_only
+// here, files_v21_snake on the main button), so one report compares them and
+// a send that fails still shows the choice.
+function sendV21Only() {
+  work(async () => {
+    trackStep('files_v21_only');
+    await sendArtificeV21();
+    say('');
+    viewV21Run({ snake: false, only: true });
+  });
+}
+
 function sendV21() {
   work(async () => {
+    trackStep('files_v21_snake');
     try {
       await state.v21.run();
     } catch (err) {
@@ -716,6 +755,8 @@ function sendV21() {
 function offerSkip() {
   const next = $('#cec-next');
   if (!next || $('#cec-skip')) return;
+  // arTIfiCE is on now: "Go on without Snake" takes the place of Send only arTIfiCE.
+  $('#cec-only')?.remove();
   const heading = root().querySelector('.cec-card h2');
   heading.textContent = `Send ${GAME.label}`;
   heading.insertAdjacentHTML('afterend', '<p class="cec-sub">arTIfiCE is on the calculator as program A.</p>');
@@ -725,16 +766,18 @@ function offerSkip() {
 }
 
 // Without Snake the shell would open to an empty list, and a game sent while
-// it is open is refused, so a game goes on first.
-function viewV21Run({ snake }) {
+// it is open is refused, so a game goes on first. The same screen follows
+// Send only arTIfiCE; its ce_step name keeps the two apart.
+const runScreen = ({ snake, only }) => (snake ? 'v21_run' : only ? 'v21_run_only' : 'v21_run_nosnake');
+function viewV21Run({ snake, only = false }) {
   paint(`
     <h2>Run arTIfiCE</h2>
     <p class="cec-sub">${snake ? `arTIfiCE and ${GAME.label} are on the calculator.` : 'arTIfiCE is on the calculator as program A.'}</p>
     ${snake ? '' : `<p>Put a game on the calculator before you run A. Send ${GAME.label} here, or pick one from the games page.</p>${sendActions()}`}
     ${walk('ce-jb-v21-run')}
-    <p>Whenever you want to play: <kbd>prgm</kbd>, run A, pick the game. Press <kbd>${LEAVE_SHELL_KEY}</kbd> to leave arTIfiCE.</p>
+    <p>Whenever you want to play: ${keyHelpHtml('cec')}, run A, pick the game. Press <kbd>${LEAVE_SHELL_KEY}</kbd> to leave arTIfiCE.</p>
     ${gamesActions()}
-  `, 3, snake ? 'v21_run' : 'v21_run_nosnake');
+  `, 3, runScreen({ snake, only }));
   if (!snake) wireSends();
 }
 
@@ -874,7 +917,7 @@ function viewPlay() {
     <h2>Put a game on it</h2>
     <p class="cec-sub">Send Snake to see it work.</p>
     ${sendActions()}
-    <div id="cec-howto"><p>Games start from the <kbd>prgm</kbd> menu.</p>${walk('ce-jb-v3-game')}</div>
+    <div id="cec-howto"><p>Games start from the ${keyHelpHtml('cec')} menu.</p>${walk('ce-jb-v3-game')}</div>
     ${gamesActions()}
   `, 3, 'play');
   wireSends();
@@ -957,6 +1000,8 @@ function installPreview() {
 
 function boot() {
   if (!root()) return;
+  // First, so previews have it too.
+  keyHelp = mountKeyHelp('cec', { onOpen: () => track('ce_key_help', { page: 'installer' }) });
   // Before the WebUSB check: a preview may load in a frame, which has no WebUSB.
   if (installPreview()) return;
   if (!navigator.usb) {

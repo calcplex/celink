@@ -4,7 +4,7 @@
 // Sending a game to a TI-84 Plus CE: every file of it, every time, libraries
 // first, after a space check, with each variable read back. The pages own the
 // words on screen; this module owns what goes over the cable.
-import { NAMED, compatibility, digest, isCE, launchesArchived, refusal } from './core.mjs';
+import { NAMED, compatibility, digest, isCE, launchesArchived, programRunning, refusal } from './core.mjs';
 import { CELink } from '../celink.mjs';
 import { parseFile, TYPE } from '../tifiles.mjs';
 
@@ -133,58 +133,111 @@ export async function identify(link) {
   };
 }
 
-// The variable inside arTIfiCE_v2.1.8xp: its data length and SHA-256.
-const ARTIFICE_A = { size: 904, sha256: 'a3d6b61efdc4352b945e78d67278a1975854d4f81070c8235e0abfcf21fcfd12' };
-// Each name as the tool itself installs it.
-const TOOLS = [
-  { name: 'A', types: PROGRAMS, size: ARTIFICE_A.size, tool: 'arTIfiCE' },
-  { name: 'AsmHook2', types: [TYPE.FLASH_APP], tool: 'AsmHook2' },
-  { name: 'Cesium', types: [TYPE.FLASH_APP], tool: 'Cesium' },
-  { name: 'CESIUM', types: PROGRAMS, tool: 'Cesium installer' },
+// What on a calculator means assembly games can run, on which routes, and
+// how a game then starts: 'A' (prgm, run A, pick the game), 'prgm' (the prgm
+// menu, once the app has been opened since the last RAM reset: the app
+// installs a hook, and a RAM reset removes it) or 'shell' (only from inside
+// the app). An app counts by its exact name and type, since an app starts on
+// every OS. arTIfiCE's program A counts only by its exact size (data with the
+// size word) and then its SHA-256, one row per release; an older release of
+// A has no row, so the installer replaces it. Nothing else counts: an
+// installer program may sit on a calculator that never ran it (on 5.5 and
+// later it cannot run without a jailbreak), and data AppVars, some named
+// like their app, outlive the app.
+export const JAILBREAKS = [
+  { tool: 'AsmHook2', name: 'AsmHook2', types: [TYPE.FLASH_APP], routes: ['v21', 'v3'], start: 'prgm' },
+  { tool: 'Cesium', name: 'Cesium', types: [TYPE.FLASH_APP], routes: ['v21', 'v3'], start: 'shell' },
+  { tool: 'CEaShell', name: 'CEaShell', types: [TYPE.FLASH_APP], routes: ['v21', 'v3'], start: 'shell' },
+  // arTIfiCE_v2.1.8xp. The OS patched v2.x in 5.8.5.
+  { tool: 'arTIfiCE v2.1', name: 'A', types: PROGRAMS, routes: ['v21'], start: 'A', size: 904, sha256: 'a3d6b61efdc4352b945e78d67278a1975854d4f81070c8235e0abfcf21fcfd12' },
 ];
 
-/**
- * The jailbreak tools a listing shows, as fixed labels. A hint, never a gate:
- * A is a common program name and AsmHook2's hook is lost on a RAM reset.
- */
-export function jailbreakTools(rows) {
-  return TOOLS
-    .filter(t => rows.some(r => r.name === t.name && t.types.includes(r.type) && (!t.size || r.size === t.size)))
-    .map(t => t.tool);
-}
+// How the pages tell a student to start a game on each route (startHint in
+// core). A tool makes a calculator read as jailbroken only where this is how
+// games start with it. A listing cannot show whether a hook is active, so
+// 'prgm' can still be wrong: a RAM reset removes the hook, and so can an
+// older shell opened after the app. Opening the app again restores it.
+export const ROUTE_START = { v21: 'A', v3: 'prgm' };
+
+// An app's listed name, without any padding the calculator may add to a
+// name shorter than 8 characters (not seen, but it would hide the app).
+const listedName = (j, r) => (j.types.includes(TYPE.FLASH_APP) ? String(r.name).replace(/[\s\0]+$/, '') : r.name);
+const matches = (j, r) => listedName(j, r) === j.name && j.types.includes(r.type) && (j.size == null || r.size === j.size);
 
 /**
- * The calculator and its jailbreak tools. A prgmA counts if it reads back as
- * arTIfiCE, or if the calculator refuses the read (a running program may
- * refuse it).
+ * The jailbreak tools a listing may show, as fixed labels: an app by name
+ * and type, an arTIfiCE program by name and size only. A hint for display,
+ * never for jailbreakState: it reads no bytes, and A is a common program
+ * name, so only inspect()'s tools may decide what the page says.
+ */
+export function jailbreakTools(rows) {
+  return JAILBREAKS.filter(j => rows.some(r => matches(j, r))).map(j => j.tool);
+}
+
+// The calculator's answer to a read while a program runs: 0x0006 was seen
+// on hardware for a name that was not there, and 0x0036 is its answer to a
+// send or delete in the same state, so either may come for a name that is.
+const READ_REFUSED_WHILE_RUNNING = 0x0006;
+const refusedWhileRunning = err =>
+  programRunning(err) || (err?.code === 'CALC_ERROR' && err.calcError === READ_REFUSED_WHILE_RUNNING);
+
+/**
+ * The calculator and the jailbreak tools on it, and the listing, for the
+ * page to match its own files against. A program that counts only by its
+ * hash is read back once, and only on a route it works on; it counts if it
+ * hashes right, or if the calculator refuses the read the way it does while
+ * a program runs. Anything else it matched by size is dropped.
  */
 export async function inspect(openLink) {
   const link = readyEach(openLink);
   const calc = await identify(link);
   const rows = await link.list();
-  let tools = jailbreakTools(rows);
-  if (tools.includes('arTIfiCE')) {
-    const a = rows.find(r => r.name === 'A' && r.size === ARTIFICE_A.size);
+  const tools = [];
+  for (const j of JAILBREAKS) {
+    const row = rows.find(r => matches(j, r));
+    if (!row) continue;
+    if (!j.sha256) {
+      tools.push(j.tool);
+      continue;
+    }
+    if (!j.routes.includes(calc.route)) continue;
     let real = false;
     try {
-      real = await digest((await link.receive('A', a.type)).data) === ARTIFICE_A.sha256;
+      real = await digest((await link.receive(row.name, row.type)).data) === j.sha256;
     } catch (err) {
       // Refused, not different: a running program may refuse reads.
-      if (err?.code === 'CALC_ERROR') real = true;
+      if (refusedWhileRunning(err)) real = true;
     }
-    if (!real) tools = tools.filter(t => t !== 'arTIfiCE');
+    if (real) tools.push(j.tool);
   }
-  return { ...calc, tools };
+  return { ...calc, tools, rows };
+}
+
+/**
+ * The shell apps on the calculator that work on this route, by name, for the
+ * page to say which one starts games: 'Cesium', 'CEaShell', or both joined
+ * with "or". '' when none (the page then says nothing about a shell).
+ */
+export function shellLabel(route, tools) {
+  return JAILBREAKS.filter(j => j.start === 'shell' && tools.includes(j.tool) && j.routes.includes(route))
+    .map(j => j.name).join(' or ');
 }
 
 /**
  * What to say before an assembly game goes: 'none' (runs as it is), 'found'
- * (a tool is there), 'missing' (suggest the installer) or 'blocked' (no
- * jailbreak exists, and sendGame refuses).
+ * (a tool is there that works on this route and starts games the way the
+ * page says), 'shell' (a shell app that works on this route, which starts
+ * games from inside itself), 'missing' (suggest the installer) or 'blocked'
+ * (no jailbreak exists, and sendGame refuses). 'found' wins over 'shell',
+ * since the page's own start sentence is then right.
  */
 export function jailbreakState(route, tools) {
   if (route === 'native') return 'none';
-  if (route === 'v21' || route === 'v3') return tools.length ? 'found' : 'missing';
+  if (route === 'v21' || route === 'v3') {
+    const works = j => tools.includes(j.tool) && j.routes.includes(route);
+    if (JAILBREAKS.some(j => works(j) && j.start === ROUTE_START[route])) return 'found';
+    return JAILBREAKS.some(j => works(j) && j.start === 'shell') ? 'shell' : 'missing';
+  }
   return 'blocked';
 }
 
@@ -317,6 +370,97 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   }
   const archived = plan.steps.filter(s => s.archived).map(s => s.entry.name);
   return { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked };
+}
+
+/**
+ * With no I/O: which listed variables deleting a game removes. Only what
+ * this game's files put there: the same name and type, never a C library,
+ * and never a name in `keep` (one another game also sends). A listed name
+ * of another type is the student's own and is `skipped`. Programs come
+ * first, then data, so a delete that stops half way never leaves a program
+ * without its data. Resolves { remove, skipped }, both listing rows.
+ */
+export function planDelete(entries, rows = [], { keep = [] } = {}) {
+  const remove = [], skipped = [];
+  const own = entries.filter(e => !library(e) && !keep.includes(e.name));
+  const rank = e => (PROGRAMS.includes(e.type) ? 0 : 1);
+  for (const e of own.map((e, i) => [e, i]).sort((x, y) => rank(x[0]) - rank(y[0]) || x[1] - y[1]).map(([e]) => e)) {
+    for (const r of rows ?? []) {
+      if (r.name !== e.name) continue;
+      (r.type === e.type ? remove : skipped).push(r);
+    }
+  }
+  return { remove, skipped };
+}
+
+/**
+ * Delete a game from the calculator over an open link: what planDelete
+ * picks from a fresh listing, RAM and archive alike, then list again.
+ * Resolves { deleted, bytes, rows }: the names deleted, their listed size,
+ * and the listing after. A failure part way carries `deleted`, the names
+ * already gone. A name the calculator acknowledged and still lists is a
+ * READBACK refusal.
+ */
+export async function deleteGame(openLink, files, { keep = [] } = {}) {
+  const entries = collectEntries(files);
+  const link = readyEach(openLink);
+  const before = await link.list();
+  const { remove } = planDelete(entries, before, { keep });
+  if (!remove.length) return { deleted: [], bytes: 0, rows: before };
+  const deleted = [];
+  let bytes = 0;
+  try {
+    for (const r of remove) {
+      await link.delete(r.name, r.type);
+      deleted.push(r.name);
+      bytes += r.size ?? 0;
+    }
+    const rows = await link.list();
+    const left = remove.find(r => rows.some(row => row.name === r.name && row.type === r.type));
+    if (left) throw refusal('READBACK', `${left.name} is still on the calculator. Try again.`, { variable: left.name });
+    return { deleted, bytes, rows };
+  } catch (err) {
+    err.deleted = deleted.slice();
+    throw err;
+  }
+}
+
+/**
+ * With no I/O: which of `games` are on the calculator, in their order.
+ * `games` is the build's list, [{ file, label, game, vars }] with `vars` the
+ * [name, type] pairs planDelete would consider for that download; a game is
+ * there when a listed variable has one of those names and its type.
+ * `memory`: 'archive' keeps a game with an archived copy, 'ram' one with a
+ * copy in RAM (deleting an archived variable frees no RAM), 'any' either.
+ */
+export function gamesOnCalculator(games, rows = [], { memory = 'any' } = {}) {
+  return games.filter(g => {
+    const here = (rows ?? []).filter(r => g.vars.some(([name, type]) => r.name === name && r.type === type));
+    if (memory === 'archive') return here.some(r => r.archived);
+    if (memory === 'ram') return here.some(r => !r.archived);
+    return here.length > 0;
+  });
+}
+
+/**
+ * With no I/O: whether the download `file` on the build's list `games` is on
+ * the calculator, by gamesOnCalculator's rule (planDelete's, precomputed),
+ * in any memory. null when the list has no such download, or there is no
+ * list: the page can then ask the download itself.
+ */
+export function listedOnCalculator(games, file, rows) {
+  const game = (games ?? []).find(g => g.file === file);
+  return game ? gamesOnCalculator([game], rows).length > 0 : null;
+}
+
+/**
+ * With no I/O: the games a send refused for space offers to delete. Those
+ * of `games` on the calculator in the memory that ran out, never the game
+ * being sent (`sending`, its file): the send replaces its own old copy, so
+ * deleting it makes no room for it.
+ */
+export function spaceGames({ games, rows, memory, sending }) {
+  return gamesOnCalculator(games ?? [], rows, { memory }).filter(g => g.file !== sending);
 }
 
 async function readBack(link, e) {

@@ -93,6 +93,293 @@ export function startHint(version, name) {
   return `Press prgm, pick ${name}, and press enter twice.`;
 }
 
+// The keypad strip with prgm boxed, a crop of a photo of the calculator,
+// at twice the width it is shown.
+export const PRGM_KEY = { src: '/images/ce/ce-prgm-key.webp', width: 720, height: 246, alt: 'The prgm key highlighted on the TI-84 Plus CE keypad' };
+
+// The prgm key inside a sentence: the key as printed, with a small "?". A
+// mouse resting on it, a click or tap, or Enter opens PRGM_KEY in a box under
+// the sentence (mountKeyHelp). `prefix` names the classes, so each page
+// styles it in its own stylesheet:
+//   <prefix>-keyhelp      the button; aria-expanded="true" while its picture shows
+//   <prefix>-keyhelp-q    the "?" inside it
+//   <prefix>-keyhelp-pop  the picture's box, one per page, hidden while closed
+export function keyHelpHtml(prefix) {
+  const p = esc(prefix);
+  return `<button type="button" class="${p}-keyhelp" aria-expanded="false" aria-controls="${p}-keyhelp-pop"><kbd>prgm</kbd><span class="${p}-keyhelp-q" aria-hidden="true">?</span></button>`;
+}
+
+/** `text` escaped for HTML, with its first "prgm" as keyHelpHtml(prefix). */
+export function withKeyHelp(text, prefix) {
+  const s = String(text);
+  const at = s.search(/\bprgm\b/);
+  return at < 0 ? esc(s) : esc(s.slice(0, at)) + keyHelpHtml(prefix) + esc(s.slice(at + 4));
+}
+
+// The box: its width, the space it keeps from the viewport's sides and from
+// the sentence, and how long a mouse rests before it opens or leaves before
+// it closes (ms).
+export const KEY_HELP = { width: 340, gutter: 16, gap: 8, openDelay: 150, closeDelay: 250 };
+
+/** The box's width in a viewport `viewWidth` CSS pixels wide. */
+export function keyHelpWidth(viewWidth) {
+  return Math.max(0, Math.min(KEY_HELP.width, viewWidth - 2 * KEY_HELP.gutter));
+}
+
+/**
+ * Where the box goes, in viewport pixels (it is position: fixed): under the
+ * paragraph or list item that holds the key (`block`), so it never covers the
+ * sentence it explains; above that block only when it does not fit under it
+ * and does above. Its left edge lines up with the key's, pulled in to keep
+ * the gutter on both sides. `key` and `block` are client rects.
+ */
+export function keyHelpPlace({ key, block, width, height, view }) {
+  const { gutter, gap } = KEY_HELP;
+  const left = Math.max(gutter, Math.min(key.left, view.width - gutter - width));
+  const below = block.bottom + gap;
+  const above = block.top - gap - height;
+  const top = below + height > view.height - gutter && above >= gutter ? above : below;
+  return { left, top };
+}
+
+/**
+ * Wires every keyHelpHtml(prefix) button on the page to one box holding the
+ * picture, added to the end of the body. It opens when a mouse rests on the
+ * key (and stays while the mouse moves onto the box), on a click or tap, and
+ * on Enter or Space; a click or tap keeps it open until the key is clicked
+ * again. Escape, a click outside the key and the box, or focus moving away
+ * from a key opened by click closes it. Touch never opens it by hover. The
+ * picture loads on the first open. `onOpen` runs once per page load, on the
+ * first open. Returns { close, refresh }: call refresh() after repainting
+ * anything that may hold the key, so a box whose key was painted away closes
+ * and one whose key moved follows it.
+ */
+export function mountKeyHelp(prefix, { onOpen = () => {}, doc = globalThis.document, win = globalThis.window } = {}) {
+  const cls = `${prefix}-keyhelp`;
+  let pop = doc.getElementById(`${cls}-pop`);
+  // A second call on the same page hands back the first one's controls.
+  if (pop?.keyHelp) return pop.keyHelp;
+  if (!pop) {
+    pop = doc.createElement('div');
+    pop.id = `${cls}-pop`;
+    pop.className = `${cls}-pop`;
+    pop.hidden = true;
+    pop.style.position = 'fixed';
+    const pic = doc.createElement('img');
+    pic.setAttribute('alt', PRGM_KEY.alt);
+    pic.setAttribute('width', String(PRGM_KEY.width));
+    pic.setAttribute('height', String(PRGM_KEY.height));
+    pic.setAttribute('decoding', 'async');
+    const x = doc.createElement('button');
+    x.setAttribute('type', 'button');
+    x.className = `${cls}-x`;
+    x.setAttribute('aria-label', 'Close');
+    x.textContent = '×';
+    pop.append(pic, x);
+    doc.body.append(pop);
+  }
+  const img = pop.querySelector('img');
+  let key = null, pinned = false, opened = false, openTimer = 0, closeTimer = 0;
+  const keyOf = t => t?.closest?.(`.${cls}`) ?? null;
+  const inPop = t => !!t && pop.contains(t);
+  const stopTimers = () => { win.clearTimeout(openTimer); win.clearTimeout(closeTimer); };
+
+  function place() {
+    if (!key) return;
+    const view = { width: doc.documentElement.clientWidth, height: win.innerHeight };
+    const width = keyHelpWidth(view.width);
+    pop.style.width = `${width}px`;
+    const block = key.closest('p, li') || key;
+    const { left, top } = keyHelpPlace({ key: key.getBoundingClientRect(), block: block.getBoundingClientRect(), width, height: pop.offsetHeight, view });
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  }
+  function open(k, pin) {
+    stopTimers();
+    if (!k.isConnected) return;
+    if (key && key !== k) key.setAttribute('aria-expanded', 'false');
+    if (!key) {
+      win.addEventListener('scroll', place, { passive: true, capture: true });
+      win.addEventListener('resize', place);
+    }
+    key = k;
+    pinned = pin;
+    if (!img.getAttribute('src')) img.setAttribute('src', PRGM_KEY.src);
+    k.setAttribute('aria-expanded', 'true');
+    pop.hidden = false;
+    place();
+    if (!opened) {
+      opened = true;
+      onOpen();
+    }
+  }
+  function close() {
+    stopTimers();
+    if (!key) return;
+    key.setAttribute('aria-expanded', 'false');
+    key = null;
+    pinned = false;
+    pop.hidden = true;
+    win.removeEventListener('scroll', place, { capture: true });
+    win.removeEventListener('resize', place);
+  }
+
+  doc.addEventListener('pointerover', e => {
+    if (e.pointerType !== 'mouse') return;
+    const k = keyOf(e.target);
+    if (k === key || (key && inPop(e.target))) win.clearTimeout(closeTimer);
+    if (k && k !== key) {
+      win.clearTimeout(openTimer);
+      openTimer = win.setTimeout(() => open(k, false), KEY_HELP.openDelay);
+    }
+  });
+  doc.addEventListener('pointerout', e => {
+    if (e.pointerType !== 'mouse') return;
+    const from = keyOf(e.target) || (inPop(e.target) ? pop : null);
+    const to = e.relatedTarget;
+    if (!from || (to && (from.contains(to) || inPop(to) || (key && key.contains(to))))) return;
+    win.clearTimeout(openTimer);
+    if (key && !pinned) closeTimer = win.setTimeout(close, KEY_HELP.closeDelay);
+  });
+  doc.addEventListener('click', e => {
+    if (key && inPop(e.target) && e.target.closest?.(`.${cls}-x`)) {
+      const k = key;
+      close();
+      k.focus?.();
+      return;
+    }
+    const k = keyOf(e.target);
+    if (k) {
+      if (k === key && pinned) close();
+      else open(k, true);
+    } else if (key && !inPop(e.target)) {
+      close();
+    }
+  });
+  doc.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  doc.addEventListener('focusout', e => {
+    const to = e.relatedTarget;
+    if (key && pinned && e.target === key && to && !inPop(to) && keyOf(to) !== key) close();
+  });
+  pop.keyHelp = {
+    close,
+    refresh() {
+      if (key && !key.isConnected) close();
+      else place();
+    },
+  };
+  return pop.keyHelp;
+}
+
+// "Game didn't start?" under a Sent message: what each route may have gone
+// wrong, as [id, label]. The ids are the analytics vocabulary.
+export const START_CHOICES = {
+  v3: [['invalid', 'It says ERROR: INVALID'], ['not_listed', "I can't find it in prgm"], ['other', 'Something else']],
+  v21: [['error', 'It shows an error'], ['no_a', "I can't find A in prgm"], ['other', 'Something else']],
+  native: [['error', 'It shows an error'], ['not_listed', "I can't find it in prgm"], ['other', 'Something else']],
+};
+
+// A calculator whose games start from a shell app (jailbreakState 'shell'):
+// no choice mentions prgm, A or a hook, since the student starts games from
+// inside the shell.
+export const SHELL_CHOICES = [['error', 'It shows an error'], ['other', 'Something else']];
+
+/**
+ * Whether a Sent message offers "Game didn't start?": an assembly game on a
+ * games page that can start as it is ('none'), with the tool the page found
+ * ('found') or from a shell ('shell'). A 'missing' message already says it
+ * won't start.
+ */
+export function startHelpShown(page, asm, state) {
+  return page !== 'math' && !!asm && (state === 'found' || state === 'none' || state === 'shell');
+}
+
+/**
+ * The choices for a route. With the OS version: below 5.3 there is no
+ * Python edition, whose TI-Basic-first menu is the only answer to "I can't
+ * find it in prgm", so that choice is left out. With `jb` 'shell', the
+ * shell's two choices, on the routes a shell works on.
+ */
+export function startHelpChoices(route, os, jb) {
+  if (jb === 'shell') return route === 'v21' || route === 'v3' ? SHELL_CHOICES : [];
+  const list = Object.hasOwn(START_CHOICES, route) ? START_CHOICES[route] : [];
+  return os && needsAsm(os) ? list.filter(([id]) => id !== 'not_listed') : list;
+}
+
+// An answer part the page turns into a button that sends the game again, so
+// the fix an answer names is one click away whatever the card's own main
+// button says at the time. One shared, frozen part: pages compare by identity.
+export const SEND_AGAIN = Object.freeze({ button: 'send', text: 'Send again' });
+
+const MEMORY_FIX = "If the error says MEMORY, delete or archive a few programs you don't need (2nd, +, 2: Mem Management).";
+// Every send carries the game's libraries, so a LibLoad error is not named:
+// a fresh send is the generic fix. Memory errors belong to "It shows an
+// error", so Something else does not repeat them where that choice exists.
+const RESEND = ['Try sending it again. ', SEND_AGAIN];
+const INSTALLER_LINK = { link: 'installer', text: 'jailbreak installer' };
+const FOLLOW_INSTALLER = ['Open the ', INSTALLER_LINK, ' and follow its steps for your calculator.'];
+const PYTHON_EDITION = 'On a Python edition, choose TI-Basic first';
+// The prgm list is sorted A to Z with the * ignored, and an archived program
+// shows with a * before its name; these pages archive every program on 5.3
+// and later, the versions that offer "I can't find it in prgm".
+const IN_THE_LIST = name => `The list is in alphabetical order, so scroll down to find it. It shows as *${name}.`;
+const lowerFirst = s => s.charAt(0).toLowerCase() + s.slice(1);
+
+// Sentences, each a string or an array of parts, joined by spaces into one
+// list of parts with neighbouring strings merged.
+function sentences(...list) {
+  const out = [];
+  list.forEach((s, i) => {
+    for (const part of [...(i ? [' '] : []), ...[].concat(s)]) {
+      if (typeof part === 'string' && typeof out.at(-1) === 'string') out[out.length - 1] += part;
+      else out.push(part);
+    }
+  });
+  return out;
+}
+
+/**
+ * The answer to one "Game didn't start?" choice: a list of parts, each a
+ * string, { link: 'installer', text } for the page to turn into a link to
+ * the jailbreak installer, or SEND_AGAIN for its button. [] for a route or
+ * choice with no answer. `jb` 'shell' answers SHELL_CHOICES.
+ */
+export function startHelpAnswer(route, choice, { os, name, jb, shell: shellName }) {
+  const reopenHook = `Press apps and open AsmHook2, then start ${name} again from prgm.`;
+  // Most likely first: the list's order and the *, then the Python edition's menu, then a fresh send.
+  const notListed = () => sentences(IN_THE_LIST(name), `${PYTHON_EDITION}, then pick ${name}.`, ['Still not there? ', SEND_AGAIN]);
+  const shell = {
+    error: () => sentences(`Start ${name} from ${shellName || 'your shell'}, not from prgm.`, MEMORY_FIX),
+    other: () => sentences(RESEND),
+  };
+  const answers = jb === 'shell' ? {
+    // The installer's v21 route sends arTIfiCE and Snake and resets nothing.
+    v21: { ...shell, other: () => sentences(RESEND, ['Still stuck? ', ...FOLLOW_INSTALLER]) },
+    // Its v3 route clears RAM first, which a calculator with a working shell must never be sent into.
+    v3: shell,
+  } : {
+    v3: {
+      invalid: () => sentences(reopenHook),
+      not_listed: notListed,
+      // The installer resets RAM on this route, so it comes last.
+      other: () => sentences(reopenHook, MEMORY_FIX, ['Still stuck? ', ...FOLLOW_INSTALLER]),
+    },
+    v21: {
+      error: () => sentences(`Games start from arTIfiCE on this calculator: ${lowerFirst(startHint(os, name))}`, MEMORY_FIX),
+      no_a: () => sentences(`${PYTHON_EDITION}.`, ['Still no A? ', ...FOLLOW_INSTALLER]),
+      other: () => sentences(RESEND, ['Still stuck? ', ...FOLLOW_INSTALLER]),
+    },
+    native: {
+      error: () => sentences(startHint(os, name), MEMORY_FIX),
+      not_listed: notListed,
+      // No jailbreak on this route, so never the installer.
+      other: () => sentences(RESEND),
+    },
+  };
+  const answer = Object.hasOwn(answers, route) && Object.hasOwn(answers[route], choice) ? answers[route][choice] : null;
+  return answer ? answer() : [];
+}
+
 /**
  * The author's release assets, pinned by SHA-256 (github.com/YvanTT/arTIfiCE/releases).
  * `replaces`: sent under its own name, replacing whatever variable holds it.
@@ -247,10 +534,23 @@ export function isChromeOS(nav) {
 // Every analytics parameter below is a fixed vocabulary, never the browser's
 // or the library's text: GA4 folds a high-cardinality value into "(other)".
 // Beyond the reasons and calcParams:
-//   choice     ce_jb_prompt, how the jailbreak prompt closed: installer | send_anyway | cancel
-//   jb         ce_calc_info, jailbreakState at connect: none | found | missing | blocked
-//   connected  ce_download, a calculator connected at the click: 1 | 0
-//   screen     ce_step, the installer screen reached, once per screen per page load
+//   choice       ce_jb_prompt, how the jailbreak prompt closed: installer | send_anyway | cancel;
+//                ce_start_report, what "Game didn't start?" got: open | invalid | error | no_a |
+//                not_listed | other (START_CHOICES, SHELL_CHOICES);
+//                ce_delete_reason, the reason picked after a delete (DELETE_REASONS)
+//   jb           ce_calc_info, jailbreakState at connect: none | found | shell | missing | blocked;
+//                ce_start_report: found | shell | none
+//   connected    ce_download, a calculator connected at the click: 1 | 0
+//   screen       ce_step, the installer screen reached, once per screen per page load;
+//                files_v21_snake / files_v21_only are the clicks on Send arTIfiCE and Snake /
+//                Send only arTIfiCE, counted before the send
+//   outcome      ce_delete: deleted | nothing (none of the game's files was there) | failed
+//   freed_kb     ce_delete, deleted only: KB of the game's own files removed, rounded up
+//   last_reason  ce_delete and ce_delete_reason for a delete offered by the list of games
+//                under a send refused for space: that refusal's reason (no_space | no_ram |
+//                calc_error_12)
+//   page         ce_key_help, the first time a page shows the prgm key's picture: hub | game |
+//                math | installer
 
 export const PREVIEW_HOST = typeof location !== 'undefined' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
@@ -319,6 +619,113 @@ export function stepTracker(send = track) {
     seen.add(screen);
     send('ce_step', { screen, ...(route && { route }) });
   };
+}
+
+/** ce_start_report: the function it returns sends each game's choice once per page load. */
+export function startReporter(send = track) {
+  const seen = new Set();
+  return ({ choice, page, route, jb, game, os }) => {
+    const key = `${game}:${choice}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    send('ce_start_report', { choice, page, route, jb, game, evo_os: os });
+  };
+}
+
+/**
+ * ce_delete's parameters: freed_kb for a delete, reason and at for a
+ * failure, last_reason (the send refusal's reason) for a delete offered by
+ * the out-of-space list.
+ */
+export function deleteParams({ game, page, route, outcome, bytes = 0, err, lastReason }) {
+  const params = { game, page, route, outcome };
+  if (outcome === 'deleted') params.freed_kb = Math.ceil(bytes / 1024);
+  if (outcome === 'failed') Object.assign(params, { reason: failReason(err) }, refusedAt(err));
+  if (lastReason) params.last_reason = lastReason;
+  return params;
+}
+
+// The line under a finished delete, as [id, label]; the ids are the
+// analytics vocabulary.
+export const DELETE_REASONS = [['didnt_work', "It didn't work"], ['didnt_like', "Didn't like it"], ['done', 'Done with it'], ['need_space', 'Need space']];
+
+/** ce_delete_reason's parameters, or null for a choice outside DELETE_REASONS. */
+export function deleteReasonParams({ game, page, choice, lastReason }) {
+  if (!DELETE_REASONS.some(([id]) => id === choice)) return null;
+  return { game, page, choice, ...(lastReason && { last_reason: lastReason }) };
+}
+
+/**
+ * ce_delete_reason for one finished delete: the function it returns sends
+ * the first choice in DELETE_REASONS and ignores every later call. True
+ * when it sent.
+ */
+export function deleteReasonReporter({ game, page, lastReason }, send = track) {
+  let sent = false;
+  return choice => {
+    const params = sent ? null : deleteReasonParams({ game, page, choice, lastReason });
+    if (!params) return false;
+    sent = true;
+    send('ce_delete_reason', params);
+    return true;
+  };
+}
+
+/**
+ * What a shown out-of-space list does when the page's calculator or its
+ * listing changes. `refusedBy` is the calculator that refused the send and
+ * `rows` the listing the list was drawn from. 'wait' with no calculator
+ * (its Deletes wait for the cable), 'drop' for any other calculator (the
+ * same one plugged in again cannot be told apart, and its listing answers
+ * another refusal), 'redraw' when the listing changed, else 'keep'.
+ */
+export function spaceListChange({ refusedBy, calc, rows }) {
+  if (!calc) return 'wait';
+  if (calc !== refusedBy) return 'drop';
+  return calc.rows === rows ? 'keep' : 'redraw';
+}
+
+/**
+ * Whether a card's game is on the calculator, kept in step with the listing.
+ * `rowsNow()` is the listing to check, or null when there is none (no
+ * calculator, or Delete off); `check(rows)` resolves whether the game is in
+ * `rows`; `repaint()` runs when a new answer changes what the card shows.
+ * The function this returns reads the answer: false until the check for the
+ * current listing resolves; a new listing resets it to false and checks
+ * again; an answer for an older listing, or a failed check, changes nothing.
+ */
+export function presenceTracker({ rowsNow, check, repaint }) {
+  let checked = null, here = false;
+  return () => {
+    const rows = rowsNow();
+    if (rows !== checked) {
+      checked = rows;
+      here = false;
+      if (rows) {
+        new Promise(resolve => resolve(check(rows))).then(answer => {
+          if (checked !== rows || !!answer === here) return;
+          here = !!answer;
+          repaint();
+        }, () => { /* no answer: the card keeps Send */ });
+      }
+    }
+    return here;
+  };
+}
+
+// The calculator's own answer when a variable does not fit.
+const OUT_OF_MEMORY = 0x000C;
+
+/**
+ * Which memory a refused send ran out of: 'archive' or 'ram' from the space
+ * check before anything moves, 'any' when the calculator itself refused for
+ * memory part way. null for any other error.
+ */
+export function outOfSpace(err) {
+  if (err?.code === 'NO_ARCHIVE_SPACE') return 'archive';
+  if (err?.code === 'NO_RAM_SPACE') return 'ram';
+  if (err?.code === 'CALC_ERROR' && err.calcError === OUT_OF_MEMORY) return 'any';
+  return null;
 }
 
 /**
@@ -442,20 +849,26 @@ export function failReason(err) {
   return linkReason(err) ?? PAGE_REASONS.get(err?.code) ?? 'other';
 }
 
+// The calculator's own out-of-memory refusal part way through a send, in the
+// words the space check before a send uses.
+export const OUT_OF_MEMORY_TEXT = "Your calculator ran out of memory. Delete or archive a few programs you don't need (2nd, +, 2: Mem Management), then try again.";
+
 /**
  * What a CE download page shows for a failed connect or send. `own` maps a
  * reason to the page's own sentence. Other errors get the refusal or the
  * library's message, which says "game"; the math page's things are
  * programs. The page's own sentences say "game" only where they mean one.
+ * A send that stopped part way asks for Send again, unless it stopped for
+ * memory: that sentence already says to free some and try again.
  */
 export function pageErrorText(err, { page, own = {} } = {}) {
   const reason = failReason(err);
-  let text = programRunning(err) ? RUNNING_TEXT : Object.hasOwn(own, reason) ? own[reason] : '';
+  let text = programRunning(err) ? RUNNING_TEXT : Object.hasOwn(own, reason) ? own[reason] : outOfSpace(err) === 'any' ? OUT_OF_MEMORY_TEXT : '';
   if (!text) {
     const engine = refusalText(err) || err?.message || String(err);
     text = page === 'math' ? engine.replace(/\bgame\b/g, 'program') : engine;
   }
-  if (err?.partial?.length || err?.removed?.length) text += ' Press Send again to finish.';
+  if ((err?.partial?.length || err?.removed?.length) && !outOfSpace(err)) text += ' Press Send again to finish.';
   return text;
 }
 

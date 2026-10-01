@@ -416,7 +416,10 @@ test('page error text: a running program wins on every page, the page words by r
   assert.equal(pageErrorText(full, { page: 'math', own }), 'This program needs 40 KB of archive.');
   const other = new CELinkError('CALC_ERROR', 'refused', { calcError: 0x0006, op: 'send', step: 'rts' });
   assert.equal(pageErrorText(other, { page: 'hub' }), refusalText(other));
-  const partial = refusal('NO_RAM_SPACE', 'Out of RAM.', { partial: ['clibs'] });
-  assert.equal(pageErrorText(partial, { page: 'hub', own }), 'Out of RAM. Press Send again to finish.');
+  const partial = new CELinkError('DISCONNECTED', 'The calculator stopped answering.', { partial: ['clibs'] });
+  assert.equal(pageErrorText(partial, { page: 'hub', own: { link_lost: 'Plug it back in.' } }), 'Plug it back in. Press Send again to finish.');
+  // A refusal for memory already says to free some and try again: no "Press Send again".
+  const ram = refusal('NO_RAM_SPACE', 'Not enough RAM. Delete or archive a few programs, then try again.', { partial: ['clibs'] });
+  assert.equal(pageErrorText(ram, { page: 'hub' }), 'Not enough RAM. Delete or archive a few programs, then try again.');
   assert.equal(pageErrorText(running, { page: 'hub' }), RUNNING_TEXT, 'no table needed');
 });

@@ -6,11 +6,22 @@
 //                  card (Send to calculator, with Download file under the arrow)
 //   a game page    one card under the download button: Connect, then Send
 //   the math page  the hub's layout; the programs are TI-Basic, so no jailbreak
+// When the build switches Delete on, a game the connected calculator already
+// has Delete as its main button on the hub and its own page, with Send
+// again first under the arrow (never on the math page).
+// A Sent message for an assembly game ends with a help link, which opens
+// answers for the calculator's route. Wherever a sentence names the prgm
+// key, the key carries a "?" that shows it on the keypad. Wherever words
+// ask for the game to be sent again, a Send again button sits beside them.
 // Without WebUSB, or on a phone, the page keeps its download buttons only.
-import { PROGRAMS, sendGame, collectEntries, isAssembly, inspect, jailbreakState, unpackZip, pickCalculator } from './gamesend.mjs';
 import {
-  PREVIEW_HOST, TICONNECT_URL, archiveMode, calcParams, downloadParams, esc, failReason, jbPromptChoice, refusedAt, isChromeOS, isWindows, linkDead,
-  pageErrorText, refusal, startHint, track, trackConnectFail,
+  PROGRAMS, sendGame, collectEntries, deleteGame, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
+  unpackZip, pickCalculator,
+} from './gamesend.mjs';
+import {
+  DELETE_REASONS, PREVIEW_HOST, SEND_AGAIN, TICONNECT_URL, archiveMode, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
+  jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
+  startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
@@ -22,12 +33,24 @@ const MATH = '/downloads/ti84plusce/math/';
 const WIN = isWindows(navigator) || (PREVIEW_HOST && /[?&]win=1\b/.test(location.search));
 const CROS = isChromeOS(navigator) || (PREVIEW_HOST && /[?&]cros=1\b/.test(location.search));
 
+// The build marks the hub's and the game pages' script tag when Delete is
+// on, with the names Delete never touches (names another download also
+// sends) and the games list, which says which games a connected calculator
+// has and which ones a send that runs out of room can offer to delete.
+const DELETE_TAG = document.querySelector('script[data-ce-delete]');
+const KEEP = (DELETE_TAG?.dataset.ceKeep || '').split(/\s+/).filter(Boolean);
+const GAMES_URL = DELETE_TAG?.dataset.ceGames || '';
+const deleteOn = () => !!DELETE_TAG && page !== 'math';
+
 const shortOs = os => String(os).split('.').slice(0, 3).join('.');
 const jailbreakLink = text => `<a href="${INSTALLER}">${text}</a>`;
+// Send again inside a message: it runs the send of the card the message is
+// on, whatever that card's main button says at the time (one listener per card).
+const SEND_AGAIN_HTML = `<button type="button" class="ce-send-again">${esc(SEND_AGAIN.text)}</button>`;
 
 // Their licenses travel with the game, which a direct send skips, so Send
 // unlocks only after the download.
-const READ_FIRST = link => `This game's author asked for the license and readme to come with the game. ${link('Download it')}, read them, then click Send to calculator again.`;
+const READ_FIRST = link => `This game's author asked for the license and readme to come with the game. ${link('Download it')}, read them, then click ${SEND_AGAIN_HTML}`;
 const DOWNLOAD_FIRST = {
   '/downloads/ce/Geometry Dash.zip': READ_FIRST,
   '/downloads/ce/FALLDOWN.zip': READ_FIRST,
@@ -67,6 +90,57 @@ async function gameFiles(file, label) {
   if (!response.ok) throw refusal('FETCH', `Couldn't get ${label} from this site. Try again in a moment.`);
   const bytes = new Uint8Array(await response.arrayBuffer());
   return /\.zip$/i.test(file) ? unpackZip(bytes) : [bytes];
+}
+
+// One fetch per download for the page, shared by Send, Delete and a game
+// page's check of what is on the calculator. A fetch that failed is
+// forgotten, so the next click tries again.
+const bundles = new Map();
+function bundle(file, label) {
+  if (!bundles.has(file)) {
+    const files = gameFiles(file, label);
+    bundles.set(file, files);
+    files.catch(() => { if (bundles.get(file) === files) bundles.delete(file); });
+  }
+  return bundles.get(file);
+}
+
+// The build's list of every hub game and its files, read the first time a
+// calculator connects with Delete on, or a send runs out of room. A failed
+// fetch is forgotten, so the next one tries again.
+let gamesList = null;
+function loadGames() {
+  if (!gamesList) {
+    const list = GAMES_URL
+      ? fetch(GAMES_URL).then(r => { if (!r.ok) throw refusal('FETCH', 'no games list'); return r.json(); })
+      : Promise.resolve([]);
+    gamesList = list;
+    list.catch(() => { if (gamesList === list) gamesList = null; });
+  }
+  return gamesList;
+}
+
+// Whether a download's game is on the calculator, by planDelete's
+// name-and-type rule: from the build's games list, which has every hub card;
+// on a game page (`fetchGame`) from the download itself when the list has no
+// entry or did not load. The hub never fetches every download for this.
+async function gameOnCalculator(file, label, rows, { fetchGame = true } = {}) {
+  const games = await loadGames().catch(() => null);
+  const listed = listedOnCalculator(games, file, rows);
+  if (listed !== null || !fetchGame) return !!listed;
+  return planDelete(collectEntries(await bundle(file, label)), rows, { keep: KEEP }).remove.length > 0;
+}
+
+// A card's main button follows the listing: the function this returns says
+// whether the card's game is there, checked again whenever the listing changes
+// (connect, a send, a delete), and `repaint` runs when a new answer arrives.
+// Until then, and with Delete off, the card offers Send (core's presenceTracker).
+function presence(file, label, repaint, { fetchGame }) {
+  return presenceTracker({
+    rowsNow: () => (link && calc && deleteOn() ? calc.rows : null),
+    check: rows => gameOnCalculator(file, label, rows, { fetchGame }),
+    repaint,
+  });
 }
 
 // A running game stops the calculator answering USB; quitting the game is enough (observed on hardware).
@@ -173,6 +247,9 @@ if (navigator.usb?.addEventListener) {
 window.addEventListener('pagehide', () => { if (link) link.close().catch(() => {}); });
 
 // `wire(dialog, done)` sets the buttons; Escape or a click outside resolves false.
+// Outside means on the backdrop, pressed and released there: a click on the
+// dialog's own padding stays, and so does the second click of a double-click
+// that opened the dialog.
 function modal(html, wire) {
   return new Promise(resolve => {
     const d = document.createElement('dialog');
@@ -185,8 +262,17 @@ function modal(html, wire) {
       d.remove();
       resolve(v);
     };
+    const outside = e => {
+      const r = d.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    let pressedOutside = false;
     d.addEventListener('cancel', e => { e.preventDefault(); done(false); });
-    d.addEventListener('click', e => { if (e.target === d) done(false); });
+    d.addEventListener('pointerdown', e => { pressedOutside = e.target === d && outside(e); });
+    d.addEventListener('click', e => {
+      if (e.target === d && pressedOutside && e.detail < 2 && outside(e)) done(false);
+      pressedOutside = false;
+    });
     wire(d, done);
     d.showModal();
   });
@@ -239,7 +325,8 @@ function verdict(c, where) {
   if (page === 'math') return `${connected(os)}. ${where}`;
   switch (jailbreakState(c.route, c.tools)) {
     case 'none': return `${connected(os)}. ${where}`;
-    case 'found': return `${connected(`${os}, jailbroken`)}. ${where} ${c.route === 'v21' ? 'Games start from prgm, then A.' : 'Games start from the prgm menu.'}`;
+    case 'found': return `${connected(`${os}, jailbroken`)}. ${where} ${c.route === 'v21' ? `Games start from ${keyHelpHtml('ce')}, then A.` : `Games start from the ${keyHelpHtml('ce')} menu.`}`;
+    case 'shell': return `${connected(`${os}, jailbroken`)}. ${where} Games start from ${esc(shellLabel(c.route, c.tools))}.`;
     case 'missing': return `${connected(os)}. It needs a jailbreak before games will run: ${jailbreakLink('jailbreak it first')}, then come back and send games.`;
     default: return `${connected(os)}. There's no jailbreak for this version yet, so these games won't run on it.`;
   }
@@ -272,7 +359,7 @@ async function run({ file, label, say, show }) {
   try {
     const c = await connect(say);
     say(`Getting ${label}…`);
-    const files = await gameFiles(file, label);
+    const files = await bundle(file, label);
     const entries = collectEntries(files);
     const asm = entries.some(isAssembly);
     const main = entries.filter(e => PROGRAMS.includes(e.type)).at(-1);
@@ -295,89 +382,355 @@ async function run({ file, label, say, show }) {
     } catch (err) {
       track('ce_send_fail', { game, reason: failReason(err), page, ...refusedAt(err) });
       if (linkDead(err)) await drop();
+      // A send that stopped part way may have left files, which Delete offers to remove.
+      else if (deleteOn()) await refreshRows();
       throw err;
     }
     // `retried: 1`: the space check passed only on a second read of the calculator.
     track('ce_send_success', { game, outcome: r.replaced.length ? 'replaced' : 'sent', route: r.route, page, ...(r.rechecked ? { retried: 1 } : {}) });
+    if (deleteOn()) await refreshRows();
     say('');
     show(sentHtml(r, main, asm, c), 'ok');
   } catch (err) {
     say('');
     if (err?.code === 'CANCELLED') return;
-    show(`<p>${esc(errorText(err))}</p>`, 'bad');
+    const memory = deleteOn() && link ? outOfSpace(err) : null;
+    const refusedBy = calc;
+    const games = memory ? await loadGames().catch(() => null) : null;
+    // A game on the calculator has Delete as its main button, so words that
+    // ask for another send get the button beside them.
+    const again = deleteOn() && link && calc ? await gameOnCalculator(file, label, calc.rows, { fetchGame: page === 'game' }).catch(() => false) : false;
+    const text = `<p>${esc(errorText(err))}${again ? ` ${SEND_AGAIN_HTML}` : ''}</p>`;
+    if (games) {
+      const list = spaceList({ memory, lastReason: failReason(err), sending: file, sendingLabel: label, games, calc: refusedBy, say, show });
+      list.wire(show(text + list.html, 'bad'));
+    } else {
+      show(text, 'bad');
+    }
   } finally {
     busy = false;
     changed();
   }
 }
 
+// Delete matches against this listing, so it is taken again after a send or
+// a delete changed the calculator, whether or not it finished.
+// After a send it runs before the Sent message, which tells the student to
+// start the game: a running game stops the calculator answering.
+async function refreshRows() {
+  if (!link) return;
+  try {
+    const rows = await readyEach(link).list();
+    if (calc) calc.rows = rows;
+  } catch (err) {
+    if (linkDead(err)) await drop();
+  }
+}
+
+let helpPanels = 0;
 function sentHtml(r, main, asm, c) {
-  const how = !main ? '' : asm ? startHint(r.os, main.name) : `Press prgm, pick ${main.name}, and press enter.`;
-  const lower = how.charAt(0).toLowerCase() + how.slice(1);
-  const html = asm && jailbreakState(r.route, c.tools) === 'missing'
-    ? [`<p><strong>Sent!</strong> It won't start until your calculator is jailbroken: ${jailbreakLink('jailbreak it now')}, then ${esc(lower)}</p>`]
-    : [`<p><strong>Sent!</strong> To ${page === 'math' ? 'run' : 'play'} it, ${esc(lower)}</p>`];
+  const state = jailbreakState(r.route, c.tools);
+  // A shell starts games from inside itself, so its sentence names no key.
+  const how = !main ? '' : asm && state === 'shell' ? `Start ${main.name} from ${shellLabel(r.route, c.tools)}.`
+    : asm ? startHint(r.os, main.name) : `Press prgm, pick ${main.name}, and press enter.`;
+  const lower = withKeyHelp(how.charAt(0).toLowerCase() + how.slice(1), 'ce');
+  const html = [];
+  if (asm && state === 'missing') {
+    html.push(`<p><strong>Sent!</strong> It won't start until your calculator is jailbroken: ${jailbreakLink('jailbreak it now')}, then ${lower}</p>`);
+  } else if (main && startHelpShown(page, asm, state)) {
+    const id = `ce-help-${++helpPanels}`;
+    html.push(`<p><strong>Sent!</strong> To play it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Game didn't start?</button></p>`,
+      helpPanel(id, { route: r.route, jb: state, game: main.name, os: r.os, shell: shellLabel(r.route, c.tools) }));
+  } else {
+    html.push(`<p><strong>Sent!</strong> To ${page === 'math' ? 'run' : 'play'} it, ${lower}</p>`);
+  }
   for (const w of r.warnings) {
     if (w.code === 'LOW_RAM_TO_RUN') html.push(`<p>Your calculator is low on RAM (${w.freeKB} KB free), so the ${page === 'math' ? 'program' : 'game'} may stop with ERR:MEMORY. Delete or archive a few programs you don't need (2nd, +, 2: Mem Management).</p>`);
   }
   return html.join('');
 }
 
+// The help link's choices, hidden until the link opens them. The
+// data attributes carry what the answer and the report need, so the panel
+// keeps working after the cable is gone.
+function helpPanel(id, { route, jb, game, os, shell }) {
+  const choices = startHelpChoices(route, os, jb).map(([choice, label]) => `<button type="button" data-help="${esc(choice)}" aria-pressed="false">${esc(label)}</button>`);
+  return `<div class="ce-help" id="${id}" hidden data-route="${esc(route)}" data-jb="${esc(jb)}" data-game="${esc(game)}" data-os="${esc(os)}" data-shell="${esc(shell)}">`
+    + `<p class="ce-help-q">What happened?</p><div class="ce-help-choices">${choices.join('')}</div><div class="ce-help-fix"></div></div>`;
+}
+
+const answerHtml = parts => parts.map(p => (typeof p === 'string' ? esc(p) : p === SEND_AGAIN ? SEND_AGAIN_HTML : jailbreakLink(esc(p.text)))).join('');
+
+// One listener for every help panel the page shows.
+function watchHelp(root) {
+  const report = startReporter();
+  const reportFrom = (panel, choice) => {
+    const d = panel.dataset;
+    report({ choice, page, route: d.route, jb: d.jb, game: d.game, os: d.os });
+  };
+  root.addEventListener('click', e => {
+    const open = e.target.closest?.('.ce-help-open');
+    if (open) {
+      const panel = document.getElementById(open.getAttribute('aria-controls'));
+      if (!panel) return;
+      const showing = panel.hidden;
+      panel.hidden = !showing;
+      open.setAttribute('aria-expanded', String(showing));
+      if (showing) reportFrom(panel, 'open');
+      return;
+    }
+    const pick = e.target.closest?.('.ce-help [data-help]');
+    if (!pick) return;
+    const panel = pick.closest('.ce-help');
+    for (const b of panel.querySelectorAll('[data-help]')) {
+      b.classList.toggle('is-picked', b === pick);
+      b.setAttribute('aria-pressed', String(b === pick));
+    }
+    const d = panel.dataset;
+    panel.querySelector('.ce-help-fix').innerHTML = `<p>${answerHtml(startHelpAnswer(d.route, pick.dataset.help, { os: d.os, name: d.game, jb: d.jb, shell: d.shell }))}</p>`;
+    reportFrom(panel, pick.dataset.help);
+  });
+}
+
+function askDelete(label) {
+  return modal(`<h2>Delete ${esc(label)} from your calculator?</h2>
+      <p class="ce-modal-actions"><button type="button" class="ce-modal-go is-danger" data-v="delete">Delete</button>
+      <button type="button" class="ce-modal-alt" data-v="cancel" autofocus>Cancel</button></p>`,
+  (d, done) => {
+    d.querySelector('[data-v="delete"]').onclick = () => done('delete');
+    d.querySelector('[data-v="cancel"]').onclick = () => done(false);
+  });
+}
+
+// A finished message (sent, deleted, an error) can be closed from its corner.
+const CLOSE_X = '<button type="button" class="ce-close" aria-label="Close">×</button>';
+
+// "Why?" under a finished delete: one pick per delete, sent once as
+// ce_delete_reason. Ignoring it sends nothing.
+function whyHtml() {
+  return `<p class="ce-why"><span>Why did you delete it?</span> ${DELETE_REASONS.map(([id, text]) => `<button type="button" data-why="${id}" aria-pressed="false">${esc(text)}</button>`).join(' ')}</p>`;
+}
+function wireWhy(box, { game, lastReason }) {
+  const line = box.querySelector('.ce-why');
+  if (!line) return;
+  const report = deleteReasonReporter({ game, page, lastReason });
+  line.addEventListener('click', e => {
+    const pick = e.target.closest('[data-why]');
+    if (!pick || !report(pick.dataset.why)) return;
+    for (const b of line.querySelectorAll('[data-why]')) {
+      b.classList.toggle('is-picked', b === pick);
+      b.setAttribute('aria-pressed', String(b === pick));
+      b.disabled = true;
+    }
+  });
+}
+
+// Under a send refused for space: this site's games on the calculator that
+// refused, in the memory that ran out (the build's games list against the
+// listing), each with Delete. Not the game being sent. No game there, no list.
+// `space`: { memory, lastReason, sending, sendingLabel, games, calc, say, show } of that box,
+// `calc` being the calculator that refused.
+const spaceRows = space => (calc && calc === space.calc
+  ? spaceGames({ games: space.games, rows: calc.rows, memory: space.memory, sending: space.sending })
+  : []);
+
+function spaceRowsHtml(here) {
+  if (!here.length) return '';
+  const off = busy || !(link && calc) ? ' disabled' : '';
+  const rows = here.map(g => `<li><span>${esc(g.label)}</span> <button type="button" class="ce-space-del" aria-label="Delete ${esc(g.label)}"${off}>Delete</button></li>`);
+  return `<p class="ce-space-q">Games from this site on your calculator:</p><ul class="ce-space">${rows.join('')}</ul>`;
+}
+
+// Every out-of-space list on the page. A listener keeps each one on its
+// calculator's listing (core.spaceListChange): a delete or a send anywhere
+// on the page redraws it, and another calculator takes it away.
+const spaceLists = new Set();
+
+function wireSpaceRows(entry, here) {
+  entry.el.querySelectorAll('.ce-space-del').forEach((b, i) => {
+    const { say, show } = entry.space;
+    b.onclick = () => removeGame({ file: here[i].file, label: here[i].label, say, show, space: entry.space });
+  });
+}
+
+function spaceList(space) {
+  const here = spaceRows(space);
+  if (!here.length) return { html: '', wire() {} };
+  return {
+    html: `<div class="ce-space-list">${spaceRowsHtml(here)}</div>`,
+    wire(box) {
+      const el = box.querySelector('.ce-space-list');
+      if (!el) return;
+      const entry = { el, space, rows: calc?.rows };
+      wireSpaceRows(entry, here);
+      spaceLists.add(entry);
+    },
+  };
+}
+
+// A list whose last game left goes with its heading, as after its own last Delete.
+function followSpaceLists() {
+  for (const entry of spaceLists) {
+    const change = entry.el.isConnected ? spaceListChange({ refusedBy: entry.space.calc, calc, rows: entry.rows }) : 'gone';
+    const here = change === 'redraw' ? spaceRows(entry.space) : null;
+    if (change === 'gone' || change === 'drop' || here?.length === 0) {
+      entry.el.remove();
+      spaceLists.delete(entry);
+      continue;
+    }
+    if (here) {
+      entry.rows = calc.rows;
+      entry.el.innerHTML = spaceRowsHtml(here);
+      wireSpaceRows(entry, here);
+    }
+    entry.el.querySelectorAll('.ce-space-del').forEach(b => { b.disabled = busy || !(link && calc); });
+  }
+}
+
+// Delete: the game's own program and data, after a confirm. A cancel sends
+// nothing. From the out-of-space list (`space`), the outcome keeps the rest
+// of the list under it, and only the calculator that refused is touched: if
+// another one was plugged in while the confirm was open, its list is gone
+// and nothing is deleted.
+async function removeGame({ file, label, say, show, space = null }) {
+  closeMenus();
+  if (busy || !(link && calc)) return;
+  if (await askDelete(label) !== 'delete' || busy) return;
+  if (space && calc && calc !== space.calc) return;
+  // After a delete from the out-of-space list, the refused game is one click
+  // away, named so it is not mistaken for the game just deleted.
+  const sendRefused = space?.sendingLabel
+    ? `<p class="ce-space-next"><button type="button" class="ce-send-again">Send ${esc(space.sendingLabel)}</button></p>` : '';
+  const outcome = (html, kind, why) => {
+    const list = space ? spaceList(space) : null;
+    const box = show(html + (why && sendRefused) + (why ? whyHtml() : '') + (list ? list.html : ''), kind);
+    if (why) wireWhy(box, why);
+    list?.wire(box);
+  };
+  // The cable came out while the confirm was open.
+  if (!(link && calc)) {
+    outcome(`<p>${esc(LOST_TEXT)}</p>`, 'bad');
+    return;
+  }
+  busy = true;
+  changed();
+  const lastReason = space?.lastReason;
+  const from = { page, route: calc.route, lastReason };
+  let game = label.slice(0, 20);
+  try {
+    say(`Deleting ${label}…`);
+    const files = await bundle(file, label);
+    const main = collectEntries(files).filter(e => PROGRAMS.includes(e.type)).at(-1);
+    if (main) game = main.name;
+    const r = await deleteGame(link, files, { keep: KEEP });
+    if (calc) calc.rows = r.rows;
+    say('');
+    if (r.deleted.length) {
+      track('ce_delete', deleteParams({ ...from, game, outcome: 'deleted', bytes: r.bytes }));
+      outcome(`<p>${esc(label)} was deleted from your calculator.</p>`, 'ok', { game, lastReason });
+    } else {
+      track('ce_delete', deleteParams({ ...from, game, outcome: 'nothing' }));
+      outcome(`<p>${esc(label)} isn't on your calculator.</p>`, 'warn');
+    }
+  } catch (err) {
+    say('');
+    track('ce_delete', deleteParams({ ...from, game, outcome: 'failed', err }));
+    if (linkDead(err)) await drop();
+    else await refreshRows();
+    outcome(`<p>${esc(err?.code === 'READBACK' ? `${label} is still on your calculator. Try again.` : errorText(err))}</p>`, 'bad');
+  } finally {
+    busy = false;
+    changed();
+  }
+}
+
 // One card under the download button, which stays the first thing a student
 // sees. It says what to do, then turns green or amber with the OS and
-// jailbreak state, and shows progress and the outcome.
+// jailbreak state, and shows progress and the outcome. Its button connects,
+// then sends; with Delete on, a game already on the calculator gets the hub
+// card's split instead: Delete, and Send again under the arrow.
 function mountGame() {
   const a = [...document.querySelectorAll('.entry-content a[href^="/downloads/ce/"], main a[href^="/downloads/ce/"]')]
     .find(el => /\.(8xg|8xp|zip)$/i.test(el.getAttribute('href')));
   if (!a) return;
   const file = decodedHref(a);
   const label = (a.textContent.split('|')[0] || '').trim() || 'This game';
+  const href = esc(a.getAttribute('href'));
   const card = document.createElement('div');
   card.className = 'ce-conn is-leaf';
   card.setAttribute('role', 'status');
   card.innerHTML = `
     <p class="msg ce-leaf-msg"></p>
-    <button type="button" class="ce-conn-go"></button>
+    <div class="ce-leaf-actions"></div>
     <p class="msg sub ce-leaf-progress" aria-live="polite"></p>
     <div class="ce-leaf-result" hidden></div>`;
   (a.closest('.wp-block-button') || a).after(card);
   watchDownloads(document);
   const msg = card.querySelector('.ce-leaf-msg');
-  const go = card.querySelector('.ce-conn-go');
+  const actions = card.querySelector('.ce-leaf-actions');
   const progress = card.querySelector('.ce-leaf-progress');
   const result = card.querySelector('.ce-leaf-result');
   let outcome = ''; // a failure tints the card until the next try
-  listeners.add(() => {
-    const connected = !!(link && calc);
-    msg.innerHTML = connected || connecting
-      ? statusHtml('Click Send to calculator to install it.')
-      : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
-    const kind = statusKind();
-    card.className = 'ce-conn is-leaf' + (kind ? ' ' + kind : outcome === 'bad' ? ' bad' : '');
-    go.textContent = connected ? 'Send to calculator' : 'Connect your calculator';
-    go.disabled = busy || connecting;
-  });
-  changed();
   const say = t => { progress.textContent = t || ''; };
   const show = (html, kind) => {
     outcome = kind;
-    result.innerHTML = html;
+    result.innerHTML = CLOSE_X + html;
     result.className = `ce-leaf-result is-${kind}`;
     result.hidden = false;
     changed();
+    return result;
   };
-  go.onclick = async () => {
-    if (busy) return;
+  const clearResult = () => {
     outcome = '';
     result.hidden = true;
     result.innerHTML = '';
+  };
+  const send = () => {
+    closeMenus();
+    if (busy) return;
+    clearResult();
+    run({ file, label, say, show });
+  };
+  const go = async () => {
+    if (busy) return;
     if (link && calc) {
-      run({ file, label, say, show });
+      send();
       return;
     }
+    clearResult();
     await connectFromClick(say, err => show(`<p>${esc(errorText(err))}</p>`, 'bad'));
     say('');
   };
+  const remove = () => removeGame({ file, label, say, show });
+  result.addEventListener('click', e => {
+    if (e.target.closest('.ce-close')) clearResult();
+    else if (e.target.closest('.ce-send-again')) send();
+  });
+  let mode = '';
+  const here = presence(file, label, () => paint(), { fetchGame: true });
+  const paint = () => {
+    const connected = !!(link && calc);
+    const onCalc = connected && here();
+    msg.innerHTML = connected || connecting
+      ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : 'Click Send to calculator to install it.')
+      : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
+    const kind = statusKind();
+    card.className = 'ce-conn is-leaf' + (kind ? ' ' + kind : outcome === 'bad' ? ' bad' : '');
+    const want = !connected ? 'connect' : onCalc ? 'delete' : 'send';
+    if (want !== mode) {
+      mode = want;
+      if (mode === 'delete') {
+        actions.innerHTML = `<div class="ce-split ce-leaf-split is-delete">${splitHtml(mode, { href, label })}</div>`;
+        wireSplit(actions.firstElementChild, mode, { send, remove });
+      } else {
+        actions.innerHTML = `<button type="button" class="ce-conn-go">${mode === 'send' ? 'Send to calculator' : 'Connect your calculator'}</button>`;
+        actions.firstElementChild.onclick = go;
+      }
+    }
+    actions.querySelectorAll('button').forEach(b => { b.disabled = busy || connecting; });
+  };
+  listeners.add(paint);
+  changed();
 }
 
 const ARROW = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -390,6 +743,44 @@ function closeMenus(except) {
   });
 }
 
+// One pair of listeners per page: a click outside any split, or Escape, closes its menu.
+function watchMenus() {
+  document.addEventListener('click', e => { if (!e.target.closest('.ce-split')) closeMenus(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenus(); });
+}
+
+// A split button's halves: the main one is what the student can do now, the
+// arrow offers the rest. 'download' (no calculator yet), 'send', or 'delete'
+// (the game is on the calculator: Send again comes first under the arrow).
+function splitHtml(mode, { href, label }) {
+  const button = 'wp-block-button__link no-border-radius';
+  const download = `<a role="menuitem" href="${href}"${downloadLinkAttrs()}>Download file</a>`;
+  const [main, items] = {
+    download: [`<a class="${button} ce-split-main" href="${href}"${downloadLinkAttrs()}>Download</a>`,
+      '<button type="button" role="menuitem" class="ce-split-send">Send to calculator</button>'],
+    send: [`<button type="button" class="${button} ce-split-main">Send to calculator</button>`, download],
+    delete: [`<button type="button" class="${button} ce-split-main ce-danger" aria-label="Delete ${esc(label)} from calculator">Delete</button>`,
+      `<button type="button" role="menuitem" class="ce-split-send">${esc(SEND_AGAIN.text)}</button>${download}`],
+  }[mode];
+  return main
+    + `<button type="button" class="${button} ce-split-arrow" aria-label="More ways to get ${esc(label)}" aria-haspopup="menu" aria-expanded="false">${ARROW}</button>`
+    + `<div class="ce-split-menu" role="menu" hidden>${items}</div>`;
+}
+
+// `send` and `remove` run the card's send and its Delete.
+function wireSplit(split, mode, { send, remove }) {
+  const arrow = split.querySelector('.ce-split-arrow');
+  const menu = split.querySelector('.ce-split-menu');
+  arrow.onclick = () => {
+    const open = menu.hidden;
+    closeMenus(menu);
+    menu.hidden = !open;
+    arrow.setAttribute('aria-expanded', String(open));
+  };
+  if (mode !== 'download') split.querySelector('.ce-split-main').onclick = mode === 'delete' ? remove : send;
+  split.querySelector('.ce-split-send')?.addEventListener('click', send);
+}
+
 function mountHub() {
   const what = page === 'math' ? 'program' : 'game';
   const cards = [...document.querySelectorAll('.entry-content .wp-block-media-text')]
@@ -397,8 +788,6 @@ function mountHub() {
     .filter(x => x.a && /\.(8xg|8xp|zip)$/i.test(x.a.getAttribute('href')));
   if (!cards.length) return;
   watchDownloads(document);
-  document.addEventListener('click', e => { if (!e.target.closest('.ce-split')) closeMenus(); });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenus(); });
   mountPanel(cards[0].card, `Pick a ${what} below and click Send to calculator.`);
   for (const { card, a } of cards) mountSplit(card, a);
   changed();
@@ -429,7 +818,8 @@ function mountPanel(before, where) {
 }
 
 // The main half is what the student can do now: Download until a calculator
-// is connected, then Send. The arrow offers the other.
+// is connected, then Send, or Delete when the game is already on it (Delete
+// on). The arrow offers the rest.
 function mountSplit(card, a) {
   const file = decodedHref(a);
   const label = (card.querySelector('h2')?.textContent || '').trim() || (page === 'math' ? 'This program' : 'This game');
@@ -444,8 +834,9 @@ function mountSplit(card, a) {
   status.setAttribute('role', 'status');
   [...card.querySelectorAll('.wp-block-button.floated')].at(-1).after(status);
   const show = (html, kind) => {
-    status.innerHTML = html;
+    status.innerHTML = html && kind !== 'busy' ? CLOSE_X + html : html;
     status.className = `ce-card-status is-${kind}`;
+    return status;
   };
   const say = t => {
     if (t) show(`<p>${esc(t)}</p>`, 'busy');
@@ -455,28 +846,20 @@ function mountSplit(card, a) {
     closeMenus();
     run({ file, label, say, show });
   };
+  const remove = () => removeGame({ file, label, say, show });
+  status.addEventListener('click', e => {
+    if (e.target.closest('.ce-close')) show('', '');
+    else if (e.target.closest('.ce-send-again')) send();
+  });
   let mode = '';
+  const here = presence(file, label, () => paint(), { fetchGame: false });
   const paint = () => {
-    const want = link && calc ? 'send' : 'download';
+    const want = !(link && calc) ? 'download' : here() ? 'delete' : 'send';
     if (want !== mode) {
       mode = want;
-      const button = 'wp-block-button__link no-border-radius';
-      split.innerHTML = (mode === 'send'
-        ? `<button type="button" class="${button} ce-split-main">Send to calculator</button>`
-        : `<a class="${button} ce-split-main" href="${href}"${downloadLinkAttrs()}>Download</a>`)
-        + `<button type="button" class="${button} ce-split-arrow" aria-label="More ways to get ${esc(label)}" aria-haspopup="menu" aria-expanded="false">${ARROW}</button>`
-        + `<div class="ce-split-menu" role="menu" hidden>${mode === 'send'
-          ? `<a role="menuitem" href="${href}"${downloadLinkAttrs()}>Download file</a>`
-          : '<button type="button" role="menuitem" class="ce-split-send">Send to calculator</button>'}</div>`;
-      const arrow = split.querySelector('.ce-split-arrow');
-      const menu = split.querySelector('.ce-split-menu');
-      arrow.onclick = () => {
-        const open = menu.hidden;
-        closeMenus(menu);
-        menu.hidden = !open;
-        arrow.setAttribute('aria-expanded', String(open));
-      };
-      split.querySelector(mode === 'send' ? '.ce-split-main' : '.ce-split-send').onclick = send;
+      split.classList.toggle('is-delete', mode === 'delete');
+      split.innerHTML = splitHtml(mode, { href, label });
+      wireSplit(split, mode, { send, remove });
     }
     split.querySelectorAll('button').forEach(b => { b.disabled = busy; });
   };
@@ -491,8 +874,19 @@ function mount() {
   if (mobile) return;
   const at = path => location.pathname === path || location.pathname === path + 'index.html';
   page = at(HUB) ? 'hub' : at(MATH) ? 'math' : 'game';
+  watchHelp(document);
+  watchMenus();
   if (page === 'game') mountGame();
   else mountHub();
+  // An out-of-space list follows the listing, and its Deletes wait for the
+  // cable and for other work.
+  listeners.add(followSpaceLists);
+  // Send again inside a message waits for other work, like the card's own buttons.
+  listeners.add(() => document.querySelectorAll('.ce-send-again').forEach(b => { b.disabled = busy; }));
+  // Last, so it runs after the panels repaint: a box whose key was painted
+  // away closes, one whose key moved follows it.
+  const keyHelp = mountKeyHelp('ce', { onOpen: () => track('ce_key_help', { page }) });
+  listeners.add(() => keyHelp.refresh());
   refreshPresent();
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount);

@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { deflateRawSync } from 'node:zlib';
 import {
   sendGame, collectEntries, planInstall, checkSpace, library, unpackZip, crc32, gameEntries,
-  jailbreakTools, jailbreakState, inspect, identify, fixSizeWord, pickCalculator,
+  jailbreakTools, jailbreakState, shellLabel, inspect, identify, fixSizeWord, pickCalculator,
 } from '../gamesend.mjs';
 import { refusedAt } from '../core.mjs';
 import { CELink, VPKT } from '../../celink.mjs';
@@ -281,19 +281,40 @@ test('a variable that fails its read-back is still listed in partial', async () 
   await assert.rejects(sendGame(link, [PUZZLE]), err => err.code === 'READBACK' && err.partial.join() === 'LibLoad,GRAPHX' && err.removed.length === 0);
 });
 
-test('jailbreakTools(): only the checked names, programs and apps by type', () => {
+test('jailbreakTools(): each app by exact name and type, arTIfiCE\'s A by size', () => {
   const row = (name, type, size) => ({ name, type, size });
-  assert.deepEqual(jailbreakTools([row('A', TYPE.PROGRAM, 904), row('AsmHook2', TYPE.FLASH_APP)]), ['arTIfiCE', 'AsmHook2']);
+  const app = name => row(name, TYPE.FLASH_APP);
+  for (const name of ['AsmHook2', 'Cesium', 'CEaShell']) {
+    assert.deepEqual(jailbreakTools([app(name)]), [name]);
+    assert.deepEqual(jailbreakTools([app(name.toUpperCase())]), [], `${name}: the name is exact`);
+    assert.deepEqual(jailbreakTools([row(name, TYPE.APPVAR, 12)]), [], `${name}: an AppVar of the same name is data`);
+  }
+  assert.deepEqual(jailbreakTools([row('A', TYPE.PROGRAM, 904)]), ['arTIfiCE v2.1']);
+  assert.deepEqual(jailbreakTools([row('A', TYPE.PROTECTED_PROGRAM, 904)]), ['arTIfiCE v2.1']);
   assert.deepEqual(jailbreakTools([row('A', TYPE.PROGRAM, 2)]), [], 'an empty prgmA is not arTIfiCE');
-  assert.deepEqual(jailbreakTools([row('Cesium', TYPE.FLASH_APP), row('CESIUM', TYPE.PROTECTED_PROGRAM)]), ['Cesium', 'Cesium installer']);
-  assert.deepEqual(jailbreakTools([row('A', TYPE.REAL), row('AsmHook2', TYPE.APPVAR), row('PUZZLE', TYPE.PROTECTED_PROGRAM)]), []);
+  assert.deepEqual(jailbreakTools([app('Cesium  '), app('AsmHook2\0')]), ['AsmHook2', 'Cesium'], 'padding after an app name is ignored');
+  assert.deepEqual(jailbreakTools([row('CESIUM', TYPE.PROTECTED_PROGRAM), row('A', TYPE.REAL), row('PUZZLE', TYPE.PROTECTED_PROGRAM)]), [], 'installer programs and data never count');
 });
 
-test('jailbreakState(): none, found, missing or blocked', () => {
+test('jailbreakState(): none, found, shell, missing or blocked', () => {
   assert.equal(jailbreakState('native', []), 'none');
+  assert.equal(jailbreakState('native', ['Cesium']), 'none');
   assert.equal(jailbreakState('v21', []), 'missing');
   assert.equal(jailbreakState('v3', ['AsmHook2']), 'found');
+  assert.equal(jailbreakState('v21', ['arTIfiCE v2.1']), 'found');
+  assert.equal(jailbreakState('v3', ['Cesium']), 'shell');
+  assert.equal(jailbreakState('v21', ['CEaShell']), 'shell');
   assert.equal(jailbreakState('unsupported', ['Cesium']), 'blocked');
+});
+
+test('shellLabel(): the shell apps that work on the route, joined with "or"', () => {
+  for (const route of ['v21', 'v3']) {
+    assert.equal(shellLabel(route, ['Cesium']), 'Cesium');
+    assert.equal(shellLabel(route, ['CEaShell']), 'CEaShell');
+    assert.equal(shellLabel(route, ['CEaShell', 'Cesium']), 'Cesium or CEaShell');
+    assert.equal(shellLabel(route, ['AsmHook2']), '');
+  }
+  assert.equal(shellLabel('native', ['Cesium']), '');
 });
 
 test('inspect(): an empty or look-alike prgmA is not arTIfiCE', async () => {
