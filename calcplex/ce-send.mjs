@@ -603,7 +603,7 @@ async function removeGame({ file, label, say, show, space = null }) {
     ? `<p class="ce-space-next"><button type="button" class="ce-send-again">Send ${esc(space.sendingLabel)}</button></p>` : '';
   const outcome = (html, kind, why) => {
     const list = space ? spaceList(space) : null;
-    const box = show(html + (why && sendRefused) + (why ? whyHtml() : '') + (list ? list.html : ''), kind);
+    const box = show(html + (why ? sendRefused + whyHtml() : '') + (list ? list.html : ''), kind);
     if (why) wireWhy(box, why);
     list?.wire(box);
   };
