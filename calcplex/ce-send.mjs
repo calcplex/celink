@@ -8,20 +8,23 @@
 //   the math page  the hub's layout; the programs are TI-Basic, so no jailbreak
 // When the build switches Delete on, a game the connected calculator already
 // has Delete as its main button on the hub and its own page, with Send
-// again first under the arrow (never on the math page).
+// again first under the arrow. The math page does the same, but only for a
+// program whose content matches a version the site served: a student's own
+// program under the same name never gets Delete.
 // A Sent message for an assembly game ends with a help link, which opens
-// answers for the calculator's route. Wherever a sentence names the prgm
+// answers for the calculator's route; on the math page, where programs arrive
+// archived on 5.3 and later, it ends with "Can't find it?". Wherever a sentence names the prgm
 // key, the key carries a "?" that shows it on the keypad. Wherever words
 // ask for the game to be sent again, a Send again button sits beside them.
 // Without WebUSB, or on a phone, the page keeps its download buttons only.
 import {
   PROGRAMS, sendGame, collectEntries, deleteGame, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
-  unpackZip, pickCalculator,
+  unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete,
 } from './gamesend.mjs';
 import {
-  DELETE_REASONS, PREVIEW_HOST, SEND_AGAIN, TICONNECT_URL, archiveMode, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
+  DELETE_REASONS, FIND_HELP_OPEN, PREVIEW_HOST, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
   jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
-  startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp,
+  startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
@@ -33,14 +36,23 @@ const MATH = '/downloads/ti84plusce/math/';
 const WIN = isWindows(navigator) || (PREVIEW_HOST && /[?&]win=1\b/.test(location.search));
 const CROS = isChromeOS(navigator) || (PREVIEW_HOST && /[?&]cros=1\b/.test(location.search));
 
-// The build marks the hub's and the game pages' script tag when Delete is
-// on, with the names Delete never touches (names another download also
-// sends) and the games list, which says which games a connected calculator
-// has and which ones a send that runs out of room can offer to delete.
+// The build marks the pages' script tag when Delete is on, with the names
+// Delete never touches (names another download also sends). The hub's and
+// the game pages' tags carry the games list, which says which games a
+// connected calculator has and which ones a send that runs out of room can
+// offer to delete. The math page's carries its own list instead: every
+// version of each program the site has served, so only a copy whose content
+// is one of them counts as there. Without that list the math page has no Delete.
 const DELETE_TAG = document.querySelector('script[data-ce-delete]');
 const KEEP = (DELETE_TAG?.dataset.ceKeep || '').split(/\s+/).filter(Boolean);
 const GAMES_URL = DELETE_TAG?.dataset.ceGames || '';
-const deleteOn = () => !!DELETE_TAG && page !== 'math';
+const OWN_URL = DELETE_TAG?.dataset.ceOwn || '';
+const deleteOn = () => !!DELETE_TAG && (page !== 'math' || !!OWN_URL);
+// Whether Delete goes by content (the math list) rather than by name and
+// type. The tag decides, not the URL: the site serves the math page at
+// other spellings of its path too (a doubled slash, an escaped letter), and
+// a tag that carries the math list always means the math page (mount).
+const byContent = () => !!OWN_URL || page === 'math';
 
 const shortOs = os => String(os).split('.').slice(0, 3).join('.');
 const jailbreakLink = text => `<a href="${INSTALLER}">${text}</a>`;
@@ -120,11 +132,46 @@ function loadGames() {
   return gamesList;
 }
 
+// The math page's list of known versions, { file, name, type, versions } per
+// card, read once per page: started when a connect starts and awaited after
+// the calculator opens, so the picker keeps the click's permission. A failed
+// fetch is forgotten, so the next connect tries again.
+let ownList = null;
+function loadOwn() {
+  if (!ownList) {
+    const list = OWN_URL
+      ? fetch(OWN_URL).then(r => { if (!r.ok) throw refusal('FETCH', 'no math list'); return r.json(); })
+        .then(l => (Array.isArray(l) ? l : []))
+      : Promise.resolve([]);
+    ownList = list;
+    list.catch(() => { if (ownList === list) ownList = null; });
+  }
+  return ownList;
+}
+
+// `promise`, or a rejection once `ms` have passed.
+const capped = (promise, ms) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error('too slow')), ms);
+  promise.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
+});
+
+// A list that has not come in 5 s counts as none, so a slow fetch only ever
+// costs the Delete, never a message.
+const ownNow = () => capped(loadOwn(), 5000).catch(() => []);
+const mathEntry = async file => (await ownNow()).find(e => e.file === file) ?? null;
+
 // Whether a download's game is on the calculator, by planDelete's
 // name-and-type rule: from the build's games list, which has every hub card;
 // on a game page (`fetchGame`) from the download itself when the list has no
 // entry or did not load. The hub never fetches every download for this.
+// On the math page a program is there only as a version the site served:
+// read back at connect or matched after a send (gamesend's ownedHere).
 async function gameOnCalculator(file, label, rows, { fetchGame = true } = {}) {
+  if (byContent()) {
+    const owned = calc?.owned ?? [];
+    const entry = await mathEntry(file);
+    return !!entry && !KEEP.includes(entry.name) && ownedHere(owned, entry, rows);
+  }
   const games = await loadGames().catch(() => null);
   const listed = listedOnCalculator(games, file, rows);
   if (listed !== null || !fetchGame) return !!listed;
@@ -134,10 +181,13 @@ async function gameOnCalculator(file, label, rows, { fetchGame = true } = {}) {
 // A card's main button follows the listing: the function this returns says
 // whether the card's game is there, checked again whenever the listing changes
 // (connect, a send, a delete), and `repaint` runs when a new answer arrives.
+// The programs known to be ours count too: a send that changes them is
+// checked again even when the listing after it could not be taken.
 // Until then, and with Delete off, the card offers Send (core's presenceTracker).
 function presence(file, label, repaint, { fetchGame }) {
   return presenceTracker({
     rowsNow: () => (link && calc && deleteOn() ? calc.rows : null),
+    ownedNow: () => calc?.owned,
     check: rows => gameOnCalculator(file, label, rows, { fetchGame }),
     repaint,
   });
@@ -145,11 +195,12 @@ function presence(file, label, repaint, { fetchGame }) {
 
 // A running game stops the calculator answering USB; quitting the game is enough (observed on hardware).
 const LOST_TEXT = 'The calculator stopped responding. If a game is running on it, quit the game and try again. Otherwise, unplug it, plug it back in, and try again.';
+// The math page's things are programs.
+const LOST_TEXT_MATH = 'The calculator stopped responding. If a program is running on it, quit it and try again. Otherwise, unplug it, plug it back in, and try again.';
+const lostText = () => (page === 'math' ? LOST_TEXT_MATH : LOST_TEXT);
 const OUTCOME_TEXT = {
   no_device: "No calculator was picked. Make sure it's plugged in and turned on, then try again. Not in the list? Try a different USB cable; charge-only cables won't work.",
   open_failed: "Couldn't connect. Close anything else using the calculator (like TI Connect CE or another tab), unplug it and plug it back in, then try again.",
-  link_lost: LOST_TEXT,
-  timeout: LOST_TEXT,
   calc_busy: 'The calculator is busy. Press clear a few times to get back to the home screen, then try again.',
 };
 const WINDOWS_TEXT = {
@@ -159,9 +210,10 @@ const CHROMEOS_TEXT = {
   open_failed: "Couldn't connect. Close any other tab using the calculator, unplug it and plug it back in, then try again. Some school Chromebooks don't let websites use USB devices, so if it keeps failing, try a Windows or Mac computer.",
 };
 
-// This page's sentences by reason, the platform's own first.
-const OWN_TEXT = { ...OUTCOME_TEXT, ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}) };
-const errorText = err => pageErrorText(err, { page, own: OWN_TEXT });
+// This page's sentences by reason, the platform's own first. A function of
+// the page, which mount() sets after this module loads.
+const ownText = () => ({ ...OUTCOME_TEXT, link_lost: lostText(), timeout: lostText(), ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}) });
+const errorText = err => pageErrorText(err, { page, own: ownText() });
 
 // One link per page, opened on the first click that needs it, or on load when
 // the browser already allowed a plugged-in calculator on this site.
@@ -191,13 +243,18 @@ async function refreshPresent() {
 async function connect(say, { quiet = false } = {}) {
   if (link) return calc;
   if (!quiet && !(await askTIConnect())) throw refusal('CANCELLED', 'The TI Connect CE question was dismissed.');
+  // Started, not awaited: the picker needs the click's permission, so nothing
+  // is awaited before it.
+  const pending = page === 'math' && deleteOn() ? loadOwn() : null;
   say(present ? 'Connecting to your calculator…' : 'Select your calculator in the popup…');
   let l;
   try {
     l = await pickCalculator();
     say('Connecting to your calculator…');
     await l.open();
-    calc = await inspect(l);
+    // No list in 5 s means no Delete this time, never a slower connect.
+    const own = pending ? await capped(pending, 5000).catch(() => []) : [];
+    calc = await inspect(l, { own });
   } catch (err) {
     if (l) await l.close().catch(() => {});
     calc = null;
@@ -346,9 +403,10 @@ function statusKind() {
 }
 
 // Everything a Send button does: connect if needed, check the jailbreak,
-// send. `say` shows progress and `show(html, kind)` the outcome.
+// send. `say` shows progress and `show(html, kind)` the outcome. Nothing
+// starts while the page connects on its own.
 async function run({ file, label, say, show }) {
-  if (busy) return;
+  if (busy || connecting) return;
   const gate = DOWNLOAD_FIRST[file];
   if (gate && !wasDownloaded(file)) {
     show(`<p>${gate(t => `<a href="${esc(encodeURI(file))}" class="ce-gate-dl"${downloadLinkAttrs()}><strong>${t}</strong></a>`)}</p>`, 'warn');
@@ -376,6 +434,7 @@ async function run({ file, label, say, show }) {
     let r;
     try {
       r = await sendGame(link, files, {
+        verify: 'full',
         archive: archiveMode(page),
         onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); },
       });
@@ -383,11 +442,20 @@ async function run({ file, label, say, show }) {
       track('ce_send_fail', { game, reason: failReason(err), page, ...refusedAt(err) });
       if (linkDead(err)) await drop();
       // A send that stopped part way may have left files, which Delete offers to remove.
-      else if (deleteOn()) await refreshRows();
+      // On the math page a copy it may have changed is no longer known to be ours.
+      else if (deleteOn()) {
+        if (calc) calc.owned = ownedAfterFailedSend(calc.owned, err, entries.map(e => e.name));
+        await refreshRows();
+      }
       throw err;
     }
     // `retried: 1`: the space check passed only on a second read of the calculator.
     track('ce_send_success', { game, outcome: r.replaced.length ? 'replaced' : 'sent', route: r.route, page, ...(r.rechecked ? { retried: 1 } : {}) });
+    // A math program read back whole as a version the site served is ours, so its card turns to Delete.
+    if (page === 'math' && deleteOn()) {
+      const owned = await ownedAfterSend(calc?.owned, r, entries, await ownNow());
+      if (calc) calc.owned = owned;
+    }
     if (deleteOn()) await refreshRows();
     say('');
     show(sentHtml(r, main, asm, c), 'ok');
@@ -397,9 +465,10 @@ async function run({ file, label, say, show }) {
     const memory = deleteOn() && link ? outOfSpace(err) : null;
     const refusedBy = calc;
     const games = memory ? await loadGames().catch(() => null) : null;
-    // A game on the calculator has Delete as its main button, so words that
-    // ask for another send get the button beside them.
-    const again = deleteOn() && link && calc ? await gameOnCalculator(file, label, calc.rows, { fetchGame: page === 'game' }).catch(() => false) : false;
+    // Words that ask for another send get the button beside them, and so does
+    // every message on a game the calculator has: its main button is Delete.
+    const again = asksSendAgain(err)
+      || (deleteOn() && link && calc ? await gameOnCalculator(file, label, calc.rows, { fetchGame: page === 'game' }).catch(() => false) : false);
     const text = `<p>${esc(errorText(err))}${again ? ` ${SEND_AGAIN_HTML}` : ''}</p>`;
     if (games) {
       const list = spaceList({ memory, lastReason: failReason(err), sending: file, sendingLabel: label, games, calc: refusedBy, say, show });
@@ -421,7 +490,11 @@ async function refreshRows() {
   if (!link) return;
   try {
     const rows = await readyEach(link).list();
-    if (calc) calc.rows = rows;
+    // Both in one tick, so each card checks once: its presence follows `rows` and `owned`.
+    if (calc) {
+      calc.owned = keepOwned(calc.owned, rows);
+      calc.rows = rows;
+    }
   } catch (err) {
     if (linkDead(err)) await drop();
   }
@@ -432,7 +505,8 @@ function sentHtml(r, main, asm, c) {
   const state = jailbreakState(r.route, c.tools);
   // A shell starts games from inside itself, so its sentence names no key.
   const how = !main ? '' : asm && state === 'shell' ? `Start ${main.name} from ${shellLabel(r.route, c.tools)}.`
-    : asm ? startHint(r.os, main.name) : `Press prgm, pick ${main.name}, and press enter.`;
+    // A TI-Basic program: the first enter pastes prgmNAME on the home screen, the second runs it.
+    : asm ? startHint(r.os, main.name) : `Press prgm, pick ${main.name}, and press enter twice.`;
   const lower = withKeyHelp(how.charAt(0).toLowerCase() + how.slice(1), 'ce');
   const html = [];
   if (asm && state === 'missing') {
@@ -441,6 +515,10 @@ function sentHtml(r, main, asm, c) {
     const id = `ce-help-${++helpPanels}`;
     html.push(`<p><strong>Sent!</strong> To play it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Game didn't start?</button></p>`,
       helpPanel(id, { route: r.route, jb: state, game: main.name, os: r.os, shell: shellLabel(r.route, c.tools) }));
+  } else if (main && findHelpShown(page, r.os)) {
+    const id = `ce-help-${++helpPanels}`;
+    html.push(`<p><strong>Sent!</strong> To run it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Can't find it?</button></p>`,
+      findPanel(id, { route: r.route, game: main.name, os: r.os }));
   } else {
     html.push(`<p><strong>Sent!</strong> To ${page === 'math' ? 'run' : 'play'} it, ${lower}</p>`);
   }
@@ -459,7 +537,17 @@ function helpPanel(id, { route, jb, game, os, shell }) {
     + `<p class="ce-help-q">What happened?</p><div class="ce-help-choices">${choices.join('')}</div><div class="ce-help-fix"></div></div>`;
 }
 
-const answerHtml = parts => parts.map(p => (typeof p === 'string' ? esc(p) : p === SEND_AGAIN ? SEND_AGAIN_HTML : jailbreakLink(esc(p.text)))).join('');
+// The math page's "Can't find it?": one answer, no choices. Its first open
+// is reported as its own choice (FIND_HELP_OPEN), without a jailbreak state,
+// so it never reads as a games panel's open.
+function findPanel(id, { route, game, os }) {
+  return `<div class="ce-help" id="${id}" hidden data-open="${FIND_HELP_OPEN}" data-route="${esc(route)}" data-game="${esc(game)}" data-os="${esc(os)}">`
+    + `<div class="ce-help-fix"><p>${answerHtml(findHelpAnswer(game))}</p></div></div>`;
+}
+
+// "TI-Basic" never breaks at its hyphen in a narrow answer box.
+const nowrapTerms = html => html.replace(/\bTI-Basic\b/g, '<span class="ce-nowrap">TI-Basic</span>');
+const answerHtml = parts => parts.map(p => (typeof p === 'string' ? nowrapTerms(esc(p)) : p === SEND_AGAIN ? SEND_AGAIN_HTML : jailbreakLink(esc(p.text)))).join('');
 
 // One listener for every help panel the page shows.
 function watchHelp(root) {
@@ -476,7 +564,7 @@ function watchHelp(root) {
       const showing = panel.hidden;
       panel.hidden = !showing;
       open.setAttribute('aria-expanded', String(showing));
-      if (showing) reportFrom(panel, 'open');
+      if (showing) reportFrom(panel, panel.dataset.open || 'open');
       return;
     }
     const pick = e.target.closest?.('.ce-help [data-help]');
@@ -609,7 +697,7 @@ async function removeGame({ file, label, say, show, space = null }) {
   };
   // The cable came out while the confirm was open.
   if (!(link && calc)) {
-    outcome(`<p>${esc(LOST_TEXT)}</p>`, 'bad');
+    outcome(`<p>${esc(lostText())}</p>`, 'bad');
     return;
   }
   busy = true;
@@ -622,12 +710,23 @@ async function removeGame({ file, label, say, show, space = null }) {
     const files = await bundle(file, label);
     const main = collectEntries(files).filter(e => PROGRAMS.includes(e.type)).at(-1);
     if (main) game = main.name;
-    const r = await deleteGame(link, files, { keep: KEEP });
-    if (calc) calc.rows = r.rows;
+    // The math page deletes only a version the site served, read back again
+    // now; without its list entry, nothing (own: []).
+    const r = byContent()
+      ? await deleteGame(link, files, { keep: KEEP, own: [await mathEntry(file)].filter(Boolean) })
+      : await deleteGame(link, files, { keep: KEEP });
+    // Both in one tick, so each card checks once: its presence follows `rows` and `owned`.
+    if (calc) {
+      calc.owned = ownedAfterDelete(calc.owned, r);
+      calc.rows = r.rows;
+    }
     say('');
     if (r.deleted.length) {
       track('ce_delete', deleteParams({ ...from, game, outcome: 'deleted', bytes: r.bytes }));
       outcome(`<p>${esc(label)} was deleted from your calculator.</p>`, 'ok', { game, lastReason });
+    } else if (r.notOurs?.length) {
+      track('ce_delete', deleteParams({ ...from, game, outcome: 'not_ours' }));
+      outcome(`<p>The ${esc(r.notOurs[0].name)} on your calculator isn't the one from this page, so it wasn't deleted.</p>`, 'warn');
     } else {
       track('ce_delete', deleteParams({ ...from, game, outcome: 'nothing' }));
       outcome(`<p>${esc(label)} isn't on your calculator.</p>`, 'warn');
@@ -861,7 +960,8 @@ function mountSplit(card, a) {
       split.innerHTML = splitHtml(mode, { href, label });
       wireSplit(split, mode, { send, remove });
     }
-    split.querySelectorAll('button').forEach(b => { b.disabled = busy; });
+    // The connect on load opens the calculator too: a click then would open it twice.
+    split.querySelectorAll('button').forEach(b => { b.disabled = busy || connecting; });
   };
   listeners.add(paint);
   paint();
@@ -872,8 +972,15 @@ function mount() {
   // A CE on a phone's USB port is untested, so phones keep the downloads only.
   const mobile = navigator.userAgentData ? navigator.userAgentData.mobile : /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
   if (mobile) return;
-  const at = path => location.pathname === path || location.pathname === path + 'index.html';
-  page = at(HUB) ? 'hub' : at(MATH) ? 'math' : 'game';
+  // The path as the server reads it: Cloudflare serves these pages at a
+  // doubled slash or an escaped letter too, and the browser keeps that spelling.
+  let here = location.pathname;
+  try { here = decodeURIComponent(here); } catch { /* a stray %: keep it as it is */ }
+  here = here.replace(/\/{2,}/g, '/');
+  const at = path => here === path || here === path + 'index.html';
+  // A tag that carries the math list makes this the math page wherever it is
+  // served, so its Delete can only go by content.
+  page = OWN_URL ? 'math' : at(HUB) ? 'hub' : at(MATH) ? 'math' : 'game';
   watchHelp(document);
   watchMenus();
   if (page === 'game') mountGame();
@@ -882,7 +989,7 @@ function mount() {
   // cable and for other work.
   listeners.add(followSpaceLists);
   // Send again inside a message waits for other work, like the card's own buttons.
-  listeners.add(() => document.querySelectorAll('.ce-send-again').forEach(b => { b.disabled = busy; }));
+  listeners.add(() => document.querySelectorAll('.ce-send-again').forEach(b => { b.disabled = busy || connecting; }));
   // Last, so it runs after the panels repaint: a box whose key was painted
   // away closes, one whose key moved follows it.
   const keyHelp = mountKeyHelp('ce', { onOpen: () => track('ce_key_help', { page }) });

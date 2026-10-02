@@ -345,9 +345,8 @@ test('the running-program words: plain, the same on every route, the shell key o
   assert.doesNotMatch(RUNNING_TEXT, /\u2014|\u2013|arTIfiCE|\bclear\b|\bmode\b/);
 });
 
-test('archive mode by page: games archive, the math page keeps its files\' flags', () => {
-  for (const page of ['hub', 'game', 'installer']) assert.equal(archiveMode(page), 'programs');
-  assert.equal(archiveMode('math'), 'file');
+test('archive mode by page: every page archives programs, the math page included', () => {
+  for (const page of ['hub', 'game', 'installer', 'math']) assert.equal(archiveMode(page), 'programs');
 });
 
 test('the jailbreak prompt reports a fixed choice: its two buttons, anything else is cancel', () => {

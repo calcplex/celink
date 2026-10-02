@@ -294,6 +294,20 @@ export function startHelpShown(page, asm, state) {
   return page !== 'math' && !!asm && (state === 'found' || state === 'none' || state === 'shell');
 }
 
+// ce_start_report's choice for the first open of the math page's "Can't
+// find it?", apart from `open` (a games panel's "Game didn't start?"), so a
+// read by route never mixes the two panels.
+export const FIND_HELP_OPEN = 'find_open';
+
+/**
+ * Whether the math page's Sent message offers "Can't find it?": on OS 5.3
+ * and later, where its programs arrive archived and show in prgm with a *.
+ * Below 5.3 they stay in RAM and the list shows them as sent.
+ */
+export function findHelpShown(page, os) {
+  return page === 'math' && launchesArchived(os);
+}
+
 /**
  * The choices for a route. With the OS version: below 5.3 there is no
  * Python edition, whose TI-Basic-first menu is the only answer to "I can't
@@ -321,7 +335,8 @@ const FOLLOW_INSTALLER = ['Open the ', INSTALLER_LINK, ' and follow its steps fo
 const PYTHON_EDITION = 'On a Python edition, choose TI-Basic first';
 // The prgm list is sorted A to Z with the * ignored, and an archived program
 // shows with a * before its name; these pages archive every program on 5.3
-// and later, the versions that offer "I can't find it in prgm".
+// and later, the versions that offer "I can't find it in prgm" and the math
+// page's "Can't find it?".
 const IN_THE_LIST = name => `The list is in alphabetical order, so scroll down to find it. It shows as *${name}.`;
 const lowerFirst = s => s.charAt(0).toLowerCase() + s.slice(1);
 
@@ -339,6 +354,15 @@ function sentences(...list) {
 }
 
 /**
+ * "I can't find it in prgm", for a program `name` sent archived: the list's
+ * order and the *, then the Python edition's menu, then a fresh send. The
+ * games' choice and the math page's "Can't find it?" say this one answer.
+ */
+export function findHelpAnswer(name) {
+  return sentences(IN_THE_LIST(name), `${PYTHON_EDITION}, then pick ${name}.`, ['Still not there? ', SEND_AGAIN]);
+}
+
+/**
  * The answer to one "Game didn't start?" choice: a list of parts, each a
  * string, { link: 'installer', text } for the page to turn into a link to
  * the jailbreak installer, or SEND_AGAIN for its button. [] for a route or
@@ -346,8 +370,7 @@ function sentences(...list) {
  */
 export function startHelpAnswer(route, choice, { os, name, jb, shell: shellName }) {
   const reopenHook = `Press apps and open AsmHook2, then start ${name} again from prgm.`;
-  // Most likely first: the list's order and the *, then the Python edition's menu, then a fresh send.
-  const notListed = () => sentences(IN_THE_LIST(name), `${PYTHON_EDITION}, then pick ${name}.`, ['Still not there? ', SEND_AGAIN]);
+  const notListed = () => findHelpAnswer(name);
   const shell = {
     error: () => sentences(`Start ${name} from ${shellName || 'your shell'}, not from prgm.`, MEMORY_FIX),
     other: () => sentences(RESEND),
@@ -536,21 +559,26 @@ export function isChromeOS(nav) {
 // Beyond the reasons and calcParams:
 //   choice       ce_jb_prompt, how the jailbreak prompt closed: installer | send_anyway | cancel;
 //                ce_start_report, what "Game didn't start?" got: open | invalid | error | no_a |
-//                not_listed | other (START_CHOICES, SHELL_CHOICES);
+//                not_listed | other (START_CHOICES, SHELL_CHOICES), and find_open, the first
+//                open of the math page's "Can't find it?" (FIND_HELP_OPEN; it has no choices);
+//                open and not_listed are always a games page's;
 //                ce_delete_reason, the reason picked after a delete (DELETE_REASONS)
 //   jb           ce_calc_info, jailbreakState at connect: none | found | shell | missing | blocked;
-//                ce_start_report: found | shell | none
+//                ce_start_report: found | shell | none, and none at all with find_open
 //   connected    ce_download, a calculator connected at the click: 1 | 0
 //   screen       ce_step, the installer screen reached, once per screen per page load;
 //                files_v21_snake / files_v21_only are the clicks on Send arTIfiCE and Snake /
 //                Send only arTIfiCE, counted before the send
-//   outcome      ce_delete: deleted | nothing (none of the game's files was there) | failed
-//   freed_kb     ce_delete, deleted only: KB of the game's own files removed, rounded up
+//   outcome      ce_delete: deleted | nothing (none of the game's files was there) | failed |
+//                not_ours (the math page: a program by that name is there, but its content is
+//                no version the page served, so nothing was deleted)
+//   freed_kb     ce_delete, deleted only: KB of the game's or program's own files removed,
+//                rounded up
 //   last_reason  ce_delete and ce_delete_reason for a delete offered by the list of games
 //                under a send refused for space: that refusal's reason (no_space | no_ram |
 //                calc_error_12)
 //   page         ce_key_help, the first time a page shows the prgm key's picture: hub | game |
-//                math | installer
+//                math | installer; ce_delete and ce_delete_reason: hub | game | math
 
 export const PREVIEW_HOST = typeof location !== 'undefined' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
@@ -588,12 +616,13 @@ export function calcParams({ os, model, home }) {
 }
 
 /**
- * sendGame's `archive` mode for a page: games (hub, game pages, the
- * installer) go to archive where the OS starts archived programs, and the
- * math page's TI-Basic programs stay where their files say.
+ * sendGame's `archive` mode for a page. Every page (hub, game pages, the
+ * installer, the math page) puts programs in archive where the OS starts
+ * archived programs, and below that keeps each file's own flag. `page` stays
+ * an argument so a page can differ again.
  */
 export function archiveMode(page) {
-  return page === 'math' ? 'file' : 'programs';
+  return 'programs';
 }
 
 /** ce_jb_prompt's `choice`: either button by its name, and any other close (Escape, a click outside) as cancel. */
@@ -628,7 +657,8 @@ export function startReporter(send = track) {
     const key = `${game}:${choice}`;
     if (seen.has(key)) return;
     seen.add(key);
-    send('ce_start_report', { choice, page, route, jb, game, evo_os: os });
+    // A panel without a jailbreak state (the math page's) sends no jb.
+    send('ce_start_report', { choice, page, route, ...(jb === undefined ? {} : { jb }), game, evo_os: os });
   };
 }
 
@@ -690,20 +720,27 @@ export function spaceListChange({ refusedBy, calc, rows }) {
  * `rowsNow()` is the listing to check, or null when there is none (no
  * calculator, or Delete off); `check(rows)` resolves whether the game is in
  * `rows`; `repaint()` runs when a new answer changes what the card shows.
+ * `ownedNow()` (optional) is anything else the check reads, such as the
+ * programs known to be the site's own, kept as a new array whenever it
+ * changes: a new one is checked again like a new listing, even when the
+ * listing could not be taken again.
  * The function this returns reads the answer: false until the check for the
  * current listing resolves; a new listing resets it to false and checks
  * again; an answer for an older listing, or a failed check, changes nothing.
  */
-export function presenceTracker({ rowsNow, check, repaint }) {
-  let checked = null, here = false;
+export function presenceTracker({ rowsNow, ownedNow = () => null, check, repaint }) {
+  let checked = null, checkedOwned = null, round = 0, here = false;
   return () => {
     const rows = rowsNow();
-    if (rows !== checked) {
+    const owned = rows ? ownedNow() : null;
+    if (rows !== checked || owned !== checkedOwned) {
       checked = rows;
+      checkedOwned = owned;
+      const mine = ++round;
       here = false;
       if (rows) {
         new Promise(resolve => resolve(check(rows))).then(answer => {
-          if (checked !== rows || !!answer === here) return;
+          if (mine !== round || !!answer === here) return;
           here = !!answer;
           repaint();
         }, () => { /* no answer: the card keeps Send */ });
@@ -859,17 +896,30 @@ export const OUT_OF_MEMORY_TEXT = "Your calculator ran out of memory. Delete or 
  * library's message, which says "game"; the math page's things are
  * programs. The page's own sentences say "game" only where they mean one.
  * A send that stopped part way asks for Send again, unless it stopped for
- * memory: that sentence already says to free some and try again.
+ * memory: that sentence already says to free some and try again. A read the
+ * calculator refused the way it does while a program runs (`runningRead`,
+ * set by deleteGame's check before a delete) reads as a running program too.
+ * A broken read-back's own words already ask for Send again, so they get no
+ * second ask.
  */
 export function pageErrorText(err, { page, own = {} } = {}) {
   const reason = failReason(err);
-  let text = programRunning(err) ? RUNNING_TEXT : Object.hasOwn(own, reason) ? own[reason] : outOfSpace(err) === 'any' ? OUT_OF_MEMORY_TEXT : '';
+  let text = programRunning(err) || err?.runningRead ? RUNNING_TEXT : Object.hasOwn(own, reason) ? own[reason] : outOfSpace(err) === 'any' ? OUT_OF_MEMORY_TEXT : '';
   if (!text) {
     const engine = refusalText(err) || err?.message || String(err);
     text = page === 'math' ? engine.replace(/\bgame\b/g, 'program') : engine;
   }
-  if ((err?.partial?.length || err?.removed?.length) && !outOfSpace(err)) text += ' Press Send again to finish.';
+  if (asksSendAgain(err) && err?.code !== 'READBACK') text += ' Press Send again to finish.';
   return text;
+}
+
+/**
+ * Whether pageErrorText's words for `err` ask for another send: a broken
+ * read-back ("Click Send again to retry.") or a send that stopped part way
+ * for anything but memory. The page puts a Send again button beside them.
+ */
+export function asksSendAgain(err) {
+  return err?.code === 'READBACK' || (!!(err?.partial?.length || err?.removed?.length) && !outOfSpace(err));
 }
 
 // Where the installer's reasons have always differed from the games pages':

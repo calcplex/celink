@@ -181,14 +181,135 @@ const READ_REFUSED_WHILE_RUNNING = 0x0006;
 const refusedWhileRunning = err =>
   programRunning(err) || (err?.code === 'CALC_ERROR' && err.calcError === READ_REFUSED_WHILE_RUNNING);
 
+// Known versions of a page's own programs, matched by content: `known` is
+// [{ name, type, versions: [[size, sha256], ...] }], each size the variable's
+// data with its size word (what a listing reports and a read returns) and
+// each sha256 over those same bytes. A listed program is one of them only
+// when its name and type match, its listed size is a known size, and then
+// the bytes it reads back hash to a known version of that size. Nothing
+// else counts: a program a student wrote or changed under the same name
+// never matches.
+
+/**
+ * With no I/O: the listed rows worth reading back, as { row, versions }.
+ * Name, type and listed size must all match; a row with no listed size
+ * never does.
+ */
+export function sizeMatches(known, rows) {
+  const out = [];
+  for (const k of Array.isArray(known) ? known : []) {
+    const versions = Array.isArray(k?.versions) ? k.versions : [];
+    for (const row of rows ?? []) {
+      if (row.name !== k.name || row.type !== k.type || row.size == null) continue;
+      if (versions.some(([size]) => size === row.size)) out.push({ row, versions });
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether `row` reads back as one of `versions`: its bytes' length and
+ * SHA-256 both listed. `link` is readyEach's. A failed read throws.
+ */
+export async function versionMatches(link, row, versions) {
+  const { data } = await link.receive(row.name, row.type);
+  const hash = await digest(data);
+  return versions.some(([size, sha256]) => size === data.length && sha256 === hash);
+}
+
+/**
+ * The listed rows that are known versions, read back once each:
+ * [{ name, type, size, archived }]. A read the calculator refuses (a running
+ * program's 0x0006 or 0x0036 included) is "not one of them"; any other error
+ * is a link that is gone, and is thrown.
+ */
+export async function ownedRows(link, known, rows) {
+  const owned = [];
+  for (const { row, versions } of sizeMatches(known, rows)) {
+    let match = false;
+    try {
+      match = await versionMatches(link, row, versions);
+    } catch (err) {
+      if (err?.code !== 'CALC_ERROR') throw err;
+    }
+    if (match) owned.push({ name: row.name, type: row.type, size: row.size, archived: !!row.archived });
+  }
+  return owned;
+}
+
+const sameVar = (a, b) => a.name === b.name && a.type === b.type;
+
+/** With no I/O: the `owned` entries a new listing still shows, by name, type and size. */
+export function keepOwned(owned, rows) {
+  return (owned ?? []).filter(o => (rows ?? []).some(r => sameVar(r, o) && r.size === o.size));
+}
+
+/**
+ * With no I/O: whether the known program `entry` ({ name, type, versions })
+ * is on the calculator as one of its versions: `owned` (ownedRows' answer,
+ * kept in step with the listing) has it, and `rows` lists it at that size,
+ * a known one. Never by name alone.
+ */
+export function ownedHere(owned, entry, rows) {
+  if (!entry || !Array.isArray(entry.versions)) return false;
+  return (owned ?? []).some(o => sameVar(o, entry) && entry.versions.some(([size]) => size === o.size)
+    && (rows ?? []).some(r => sameVar(r, o) && r.size === o.size));
+}
+
+/**
+ * After a send: `owned` with each sent variable whose bytes are a known
+ * version, only when the send read every variable back (`r.verify` 'full').
+ * `entries` are the variables sent (collectEntries), `known` as above.
+ */
+export async function ownedAfterSend(owned, r, entries, known) {
+  const out = (owned ?? []).slice();
+  if (r?.verify !== 'full') return out;
+  for (const name of r.sent ?? []) {
+    const e = (entries ?? []).find(x => x.name === name);
+    const k = e && (Array.isArray(known) ? known : []).find(x => sameVar(x, e));
+    if (!k) continue;
+    const hash = await digest(e.data);
+    if (!k.versions.some(([size, sha256]) => size === e.data.length && sha256 === hash)) continue;
+    const at = out.findIndex(o => sameVar(o, e));
+    const entry = { name: e.name, type: e.type, size: e.data.length, archived: (r.archived ?? []).includes(e.name) };
+    if (at < 0) out.push(entry);
+    else out[at] = entry;
+  }
+  return out;
+}
+
+/**
+ * After a send that failed and kept the link: `owned` without the names it
+ * may have changed. A copy that failed its read-back is still listed, often
+ * at the same size, and is not a known version. `names` are the file's own
+ * variables. A failure before anything moved leaves the calculator, and
+ * `owned`, as they were: no `partial` on the error (the space check), or
+ * nothing sent and nothing removed (the first delete refused, as while a
+ * program runs). sendGame deletes every listed variable a file replaces
+ * before it sends that file, so a copy it changed is always in one of them.
+ */
+export function ownedAfterFailedSend(owned, err, names = []) {
+  if (!err?.partial?.length && !err?.removed?.length) return (owned ?? []).slice();
+  const gone = new Set([...(err.partial ?? []), ...(err.removed ?? []), ...names]);
+  return (owned ?? []).filter(o => !gone.has(o.name));
+}
+
+/** After deleteGame: `owned` kept in step with its listing, less what it found was not a known version. */
+export function ownedAfterDelete(owned, r) {
+  return keepOwned(owned, r?.rows).filter(o => !(r?.notOurs ?? []).some(n => sameVar(n, o)));
+}
+
 /**
  * The calculator and the jailbreak tools on it, and the listing, for the
  * page to match its own files against. A program that counts only by its
  * hash is read back once, and only on a route it works on; it counts if it
  * hashes right, or if the calculator refuses the read the way it does while
- * a program runs. Anything else it matched by size is dropped.
+ * a program runs. Anything else it matched by size is dropped. Any other
+ * error during a read means the link is gone, and is thrown. With `own`
+ * (known versions, as above), `owned` is ownedRows' answer, one read per
+ * size match; without it nothing more is read and `owned` is [].
  */
-export async function inspect(openLink) {
+export async function inspect(openLink, { own = [] } = {}) {
   const link = readyEach(openLink);
   const calc = await identify(link);
   const rows = await link.list();
@@ -207,10 +328,13 @@ export async function inspect(openLink) {
     } catch (err) {
       // Refused, not different: a running program may refuse reads.
       if (refusedWhileRunning(err)) real = true;
+      // Only a calculator's refusal is an answer; anything else is a lost link.
+      else if (err?.code !== 'CALC_ERROR') throw err;
     }
     if (real) tools.push(j.tool);
   }
-  return { ...calc, tools, rows };
+  const owned = Array.isArray(own) && own.length ? await ownedRows(link, own, rows) : [];
+  return { ...calc, tools, rows, owned };
 }
 
 /**
@@ -323,7 +447,7 @@ async function planThatFits(link, todo, calc, archive) {
  *                            every program in archive on an OS that starts archived programs
  *                            (5.3.0 and later) and stores everything else where its file says,
  *                            and below 5.3 is 'file'; 'all' archives all
- * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked }. A
+ * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked, verify }. A
  * failure part way carries `partial`, the names already on the calculator,
  * and `removed`, names deleted whose new copy never landed.
  */
@@ -369,7 +493,7 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
     throw err;
   }
   const archived = plan.steps.filter(s => s.archived).map(s => s.entry.name);
-  return { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked };
+  return { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked, verify };
 }
 
 /**
@@ -396,20 +520,42 @@ export function planDelete(entries, rows = [], { keep = [] } = {}) {
 /**
  * Delete a game from the calculator over an open link: what planDelete
  * picks from a fresh listing, RAM and archive alike, then list again.
- * Resolves { deleted, bytes, rows }: the names deleted, their listed size,
- * and the listing after. A failure part way carries `deleted`, the names
- * already gone. A name the calculator acknowledged and still lists is a
- * READBACK refusal.
+ * With `own` (known versions, as above; [] included) a row is deleted only
+ * if `own` has its name and type and it reads back, now, as one of those
+ * versions; any other row goes to `notOurs` and stays (a row `own` does not
+ * name is never read). A read refused the way a running program refuses is
+ * thrown with `runningRead`. Without `own`, by planDelete's rule alone.
+ * Resolves { deleted, bytes, rows, notOurs }: the names deleted, their
+ * listed size, the listing after, and the rows left alone. A failure part
+ * way carries `deleted`, the names already gone. A name the calculator
+ * acknowledged and still lists is a READBACK refusal.
  */
-export async function deleteGame(openLink, files, { keep = [] } = {}) {
+export async function deleteGame(openLink, files, { keep = [], own = null } = {}) {
   const entries = collectEntries(files);
   const link = readyEach(openLink);
   const before = await link.list();
-  const { remove } = planDelete(entries, before, { keep });
-  if (!remove.length) return { deleted: [], bytes: 0, rows: before };
-  const deleted = [];
+  const { remove: picked } = planDelete(entries, before, { keep });
+  const deleted = [], notOurs = [];
   let bytes = 0;
   try {
+    let remove = picked;
+    if (own != null) {
+      remove = [];
+      for (const r of picked) {
+        const k = (Array.isArray(own) ? own : []).find(o => sameVar(o, r));
+        let match = false;
+        if (k) {
+          try {
+            match = await versionMatches(link, r, Array.isArray(k.versions) ? k.versions : []);
+          } catch (err) {
+            if (refusedWhileRunning(err)) err.runningRead = true;
+            throw err;
+          }
+        }
+        (match ? remove : notOurs).push(r);
+      }
+    }
+    if (!remove.length) return { deleted, bytes, rows: before, notOurs };
     for (const r of remove) {
       await link.delete(r.name, r.type);
       deleted.push(r.name);
@@ -418,7 +564,7 @@ export async function deleteGame(openLink, files, { keep = [] } = {}) {
     const rows = await link.list();
     const left = remove.find(r => rows.some(row => row.name === r.name && row.type === r.type));
     if (left) throw refusal('READBACK', `${left.name} is still on the calculator. Try again.`, { variable: left.name });
-    return { deleted, bytes, rows };
+    return { deleted, bytes, rows, notOurs };
   } catch (err) {
     err.deleted = deleted.slice();
     throw err;
