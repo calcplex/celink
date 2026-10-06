@@ -49,10 +49,10 @@ const GAMES_URL = DELETE_TAG?.dataset.ceGames || '';
 const OWN_URL = DELETE_TAG?.dataset.ceOwn || '';
 const deleteOn = () => !!DELETE_TAG && (page !== 'math' || !!OWN_URL);
 // Whether Delete goes by content (the math list) rather than by name and
-// type. The tag decides, not the URL: the site serves the math page at
-// other spellings of its path too (a doubled slash, an escaped letter), and
-// a tag that carries the math list always means the math page (mount).
-const byContent = () => !!OWN_URL || page === 'math';
+// type. Off: the math page deletes by name and type like the games, so a
+// modified copy can be deleted too, and the confirm is the only guard. The
+// content path below stays behind this switch.
+const byContent = () => false;
 
 const shortOs = os => String(os).split('.').slice(0, 3).join('.');
 const jailbreakLink = text => `<a href="${INSTALLER}">${text}</a>`;
@@ -245,7 +245,7 @@ async function connect(say, { quiet = false } = {}) {
   if (!quiet && !(await askTIConnect())) throw refusal('CANCELLED', 'The TI Connect CE question was dismissed.');
   // Started, not awaited: the picker needs the click's permission, so nothing
   // is awaited before it.
-  const pending = page === 'math' && deleteOn() ? loadOwn() : null;
+  const pending = page === 'math' && deleteOn() && byContent() ? loadOwn() : null;
   say(present ? 'Connecting to your calculator…' : 'Select your calculator in the popup…');
   let l;
   try {
@@ -452,7 +452,7 @@ async function run({ file, label, say, show }) {
     // `retried: 1`: the space check passed only on a second read of the calculator.
     track('ce_send_success', { game, outcome: r.replaced.length ? 'replaced' : 'sent', route: r.route, page, ...(r.rechecked ? { retried: 1 } : {}) });
     // A math program read back whole as a version the site served is ours, so its card turns to Delete.
-    if (page === 'math' && deleteOn()) {
+    if (page === 'math' && deleteOn() && byContent()) {
       const owned = await ownedAfterSend(calc?.owned, r, entries, await ownNow());
       if (calc) calc.owned = owned;
     }
@@ -951,7 +951,8 @@ function mountSplit(card, a) {
     else if (e.target.closest('.ce-send-again')) send();
   });
   let mode = '';
-  const here = presence(file, label, () => paint(), { fetchGame: false });
+  // The math hub has no games list, so its few small downloads say what each card sends.
+  const here = presence(file, label, () => paint(), { fetchGame: page === 'math' });
   const paint = () => {
     const want = !(link && calc) ? 'download' : here() ? 'delete' : 'send';
     if (want !== mode) {
