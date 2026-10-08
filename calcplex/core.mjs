@@ -701,6 +701,28 @@ export function deleteReasonReporter({ game, page, lastReason }, send = track) {
   };
 }
 
+// The feedback box under "Why did you delete it?" (It didn't work, Didn't like it):
+// free text into CalcPlex's feedback form (a Google Form with one paragraph
+// question, read by hand). The page writes what it already knows in front of
+// the student's words, so the form needs no second field. A cross-site post
+// to the form's own endpoint gets an opaque reply: a send that reaches
+// Google counts as sent.
+export const FEEDBACK_FORM = 'https://docs.google.com/forms/d/e/1FAIpQLSdEZQzSDRSt1wJ5gphgUgVBad0z5W_k7eH5HTMpY7SwdTGJZg';
+export const FEEDBACK_FIELD = 'entry.298278995';
+export const FEEDBACK_MAX = 2000;
+
+/** The row the form gets: "[CE · Snake · deleted: It didn't work · OS 5.8.2] words". Empty parts drop out. */
+export function feedbackText(text, parts) {
+  const tag = parts.filter(p => p !== undefined && p !== null && p !== '').map(p => String(p).replace(/[[\]\s]+/g, ' ').trim()).join(' · ');
+  return `[${tag}] ${String(text).trim().slice(0, FEEDBACK_MAX)}`;
+}
+
+/** Post one answer. Rejects only when the request never left (offline, blocked). */
+export async function sendFeedback(text, parts, post = globalThis.fetch) {
+  const body = new URLSearchParams({ [FEEDBACK_FIELD]: feedbackText(text, parts) });
+  await post(`${FEEDBACK_FORM}/formResponse`, { method: 'POST', mode: 'no-cors', body });
+}
+
 /**
  * What a shown out-of-space list does when the page's calculator or its
  * listing changes. `refusedBy` is the calculator that refused the send and

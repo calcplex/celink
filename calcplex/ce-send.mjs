@@ -22,9 +22,9 @@ import {
   unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete,
 } from './gamesend.mjs';
 import {
-  DELETE_REASONS, FIND_HELP_OPEN, PREVIEW_HOST, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
+  DELETE_REASONS, FEEDBACK_FORM, FEEDBACK_MAX, FIND_HELP_OPEN, PREVIEW_HOST, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
   jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
-  startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
+  sendFeedback, startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
@@ -598,7 +598,7 @@ const CLOSE_X = '<button type="button" class="ce-close" aria-label="Close">×</b
 function whyHtml() {
   return `<p class="ce-why"><span>Why did you delete it?</span> ${DELETE_REASONS.map(([id, text]) => `<button type="button" data-why="${id}" aria-pressed="false">${esc(text)}</button>`).join(' ')}</p>`;
 }
-function wireWhy(box, { game, lastReason }) {
+function wireWhy(box, { game, label, os, route, lastReason }) {
   const line = box.querySelector('.ce-why');
   if (!line) return;
   const report = deleteReasonReporter({ game, page, lastReason });
@@ -609,6 +609,54 @@ function wireWhy(box, { game, lastReason }) {
       b.classList.toggle('is-picked', b === pick);
       b.setAttribute('aria-pressed', String(b === pick));
       b.disabled = true;
+    }
+    const ask = FEEDBACK_ASK[pick.dataset.why];
+    if (ask) line.insertAdjacentHTML('afterend', feedbackHtml(label || game, { ask, why: pick.textContent, os, route }));
+  });
+}
+
+// The feedback box: one text field into the feedback form, under "Why did
+// you delete it?" after the two answers that leave a question open. What
+// the page knows (the game, the answer, the OS) rides in front of the
+// words; one listener (watchFeedback) sends every box on the page.
+const FEEDBACK_ASK = { didnt_work: "What didn't work?", didnt_like: 'What could be improved?' };
+// ce_feedback's choice, from the answer's words the box keeps.
+const FEEDBACK_ASK_IDS = Object.fromEntries(DELETE_REASONS.map(([id, text]) => [text, id]));
+let feedbackBoxes = 0;
+function feedbackHtml(label, { ask, why = '', os = '', route = '' }) {
+  const id = `ce-fb-${++feedbackBoxes}`;
+  return `<div class="ce-fb" data-game="${esc(label)}" data-why="${esc(why)}" data-os="${esc(os)}" data-route="${esc(route)}">`
+    + `<label for="${id}">${esc(ask)}</label>`
+    + `<textarea id="${id}" rows="3" maxlength="${FEEDBACK_MAX}"></textarea>`
+    + '<p class="ce-fb-row"><button type="button" class="ce-fb-send" disabled>Send</button></p></div>';
+}
+
+// The tag in front of the words, from the box's own data.
+function feedbackParts(fb) {
+  const d = fb.dataset;
+  return ['CE', d.game, `deleted: ${d.why}`, d.os && `OS ${shortOs(d.os)}`, d.route, location.pathname, PREVIEW_HOST && 'PREVIEW'];
+}
+
+function watchFeedback(root) {
+  root.addEventListener('input', e => {
+    const fb = e.target.closest?.('.ce-fb');
+    if (fb) fb.querySelector('.ce-fb-send').disabled = !e.target.value.trim();
+  });
+  root.addEventListener('click', async e => {
+    const go = e.target.closest?.('.ce-fb-send');
+    if (!go) return;
+    const fb = go.closest('.ce-fb');
+    const text = fb.querySelector('textarea').value.trim();
+    if (!text) return;
+    go.disabled = true;
+    fb.querySelector('.ce-fb-err')?.remove();
+    try {
+      await sendFeedback(text, feedbackParts(fb));
+      fb.innerHTML = '<p class="ce-fb-done">Thank you! We read every response and will do our best to improve.</p>';
+      track('ce_feedback', { game: fb.dataset.game.slice(0, 40), page, choice: FEEDBACK_ASK_IDS[fb.dataset.why] || 'other' });
+    } catch {
+      go.disabled = false;
+      go.closest('.ce-fb-row').insertAdjacentHTML('afterend', `<p class="ce-fb-err">That didn't send. Try again, or <a href="${FEEDBACK_FORM}/viewform" target="_blank" rel="noopener">open the form</a>.</p>`);
     }
   });
 }
@@ -704,6 +752,7 @@ async function removeGame({ file, label, say, show, space = null }) {
   changed();
   const lastReason = space?.lastReason;
   const from = { page, route: calc.route, lastReason };
+  const { os, route } = calc;
   let game = label.slice(0, 20);
   try {
     say(`Deleting ${label}…`);
@@ -723,7 +772,7 @@ async function removeGame({ file, label, say, show, space = null }) {
     say('');
     if (r.deleted.length) {
       track('ce_delete', deleteParams({ ...from, game, outcome: 'deleted', bytes: r.bytes }));
-      outcome(`<p>${esc(label)} was deleted from your calculator.</p>`, 'ok', { game, lastReason });
+      outcome(`<p>${esc(label)} was deleted from your calculator.</p>`, 'ok', { game, label, os, route, lastReason });
     } else if (r.notOurs?.length) {
       track('ce_delete', deleteParams({ ...from, game, outcome: 'not_ours' }));
       outcome(`<p>The ${esc(r.notOurs[0].name)} on your calculator isn't the one from this page, so it wasn't deleted.</p>`, 'warn');
@@ -830,6 +879,7 @@ function mountGame() {
   };
   listeners.add(paint);
   changed();
+  demoFeedback(show, label);
 }
 
 const ARROW = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -966,6 +1016,15 @@ function mountSplit(card, a) {
   };
   listeners.add(paint);
   paint();
+  if (card === document.querySelector('.wp-block-media-text')) demoFeedback(show, label);
+}
+
+// ?fb=deleted on localhost paints a finished delete on the game page (on a
+// hub, the first card) without a calculator, to look at the feedback box.
+function demoFeedback(show, label) {
+  if (!(PREVIEW_HOST && /[?&]fb=deleted\b/.test(location.search))) return;
+  const box = show(`<p>${esc(label)} was deleted from your calculator.</p>${whyHtml()}`, 'ok');
+  wireWhy(box, { game: label, label, os: '5.8.2.0012', route: 'v21' });
 }
 
 function mount() {
@@ -983,6 +1042,7 @@ function mount() {
   // served, so its Delete can only go by content.
   page = OWN_URL ? 'math' : at(HUB) ? 'hub' : at(MATH) ? 'math' : 'game';
   watchHelp(document);
+  watchFeedback(document);
   watchMenus();
   if (page === 'game') mountGame();
   else mountHub();
