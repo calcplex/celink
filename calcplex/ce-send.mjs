@@ -17,6 +17,9 @@
 // key, the key carries a "?" that shows it on the keypad. Wherever words
 // ask for the game to be sent again, a Send again button sits beside them.
 // Without WebUSB, or on a phone, the page keeps its download buttons only.
+// The page's build puts the connect panel in the HTML (#ce-conn) in the
+// words painted first here, so nothing pops in when this loads; where
+// this would not mount, <html> is ce-nosend and the panel shows a one-line note.
 import {
   PROGRAMS, sendGame, collectEntries, deleteGame, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
   unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete,
@@ -804,7 +807,8 @@ function mountGame() {
   const file = decodedHref(a);
   const label = (a.textContent.split('|')[0] || '').trim() || 'This game';
   const href = esc(a.getAttribute('href'));
-  const card = document.createElement('div');
+  const built = document.getElementById('ce-conn');
+  const card = built || document.createElement('div');
   card.className = 'ce-conn is-leaf';
   card.setAttribute('role', 'status');
   card.innerHTML = `
@@ -812,7 +816,7 @@ function mountGame() {
     <div class="ce-leaf-actions"></div>
     <p class="msg sub ce-leaf-progress" aria-live="polite"></p>
     <div class="ce-leaf-result" hidden></div>`;
-  (a.closest('.wp-block-button') || a).after(card);
+  if (!built) (a.closest('.wp-block-button') || a).after(card);
   watchDownloads(document);
   const msg = card.querySelector('.ce-leaf-msg');
   const actions = card.querySelector('.ce-leaf-actions');
@@ -943,9 +947,10 @@ function mountHub() {
 }
 
 function mountPanel(before, where) {
-  const panel = document.createElement('div');
+  const built = document.getElementById('ce-conn');
+  const panel = built || document.createElement('div');
   panel.setAttribute('role', 'status');
-  before.before(panel);
+  if (!built) before.before(panel);
   let panelError = '';
   listeners.add(() => {
     const kind = statusKind();
@@ -1028,10 +1033,14 @@ function demoFeedback(show, label) {
 }
 
 function mount() {
-  if (!navigator.usb) return;
   // A CE on a phone's USB port is untested, so phones keep the downloads only.
+  // The page's <head> runs this same check first, so the panel's note is
+  // up before the first paint; keep the two alike.
   const mobile = navigator.userAgentData ? navigator.userAgentData.mobile : /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
-  if (mobile) return;
+  if (!navigator.usb || mobile) {
+    document.documentElement.classList.add('ce-nosend');
+    return;
+  }
   // The path as the server reads it: Cloudflare serves these pages at a
   // doubled slash or an escaped letter too, and the browser keeps that spelling.
   let here = location.pathname;
