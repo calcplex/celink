@@ -562,7 +562,8 @@ export function isChromeOS(nav) {
 //                not_listed | other (START_CHOICES, SHELL_CHOICES), and find_open, the first
 //                open of the math page's "Can't find it?" (FIND_HELP_OPEN; it has no choices);
 //                open and not_listed are always a games page's;
-//                ce_delete_reason, the reason picked after a delete (DELETE_REASONS)
+//                ce_delete_reason, the reason picked after a delete (DELETE_REASONS);
+//                ce_rate, the stars given: '1' to '5', or a change as '4to2' (rateParams)
 //   jb           ce_calc_info, jailbreakState at connect: none | found | shell | missing | blocked;
 //                ce_start_report: found | shell | none, and none at all with find_open
 //   connected    ce_download, a calculator connected at the click: 1 | 0
@@ -578,7 +579,8 @@ export function isChromeOS(nav) {
 //                under a send refused for space: that refusal's reason (no_space | no_ram |
 //                calc_error_12)
 //   page         ce_key_help, the first time a page shows the prgm key's picture: hub | game |
-//                math | installer; ce_delete and ce_delete_reason: hub | game | math
+//                math | installer; ce_delete and ce_delete_reason: hub | game | math;
+//                ce_rate: hub | game | math
 
 export const PREVIEW_HOST = typeof location !== 'undefined' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
@@ -699,6 +701,78 @@ export function deleteReasonReporter({ game, page, lastReason }, send = track) {
     send('ce_delete_reason', params);
     return true;
   };
+}
+
+// Stars for a game or math program the calculator already had when the page
+// connected: "Played it? Rate it:" ("Used it?" on the math page) and five
+// stars on its card, never on one this page just sent, which nobody has
+// played yet. One vote per game per browser, kept in localStorage and open to
+// change; it goes out as ce_rate.
+export const RATE_STARS = 5;
+export const RATE_STORE = 'calcplex-rated';
+// A low score asks what to change, in the feedback box.
+export const RATE_ASK_AT = 3;
+
+const wholeStars = n => Number.isInteger(n) && n >= 1 && n <= RATE_STARS;
+
+/**
+ * ce_rate's parameters, or null for anything but a whole number of stars from
+ * 1 to 5. `from`, the vote it replaces, makes the choice a change ('4to2'),
+ * which counts as one vote moved from 4 to 2; the same stars again is null.
+ */
+export function rateParams({ game, page, stars, from = 0 }) {
+  if (!wholeStars(stars) || !game) return null;
+  if (!from) return { game, page, choice: String(stars) };
+  if (!wholeStars(from) || from === stars) return null;
+  return { game, page, choice: `${from}to${stars}` };
+}
+
+// The browser's votes as { 'ce:SNAKE': 4, ... }. Storage that is missing,
+// blocked or garbled counts as no votes, so the stars still show.
+function readRatings(store, name = RATE_STORE) {
+  try {
+    const v = JSON.parse(store?.getItem(name) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The stars this browser gave the game (`key`, e.g. 'ce:SNAKE'), or 0. */
+export function ratedStars(key, store = globalThis.localStorage) {
+  const n = readRatings(store)[key];
+  return wholeStars(n) ? n : 0;
+}
+
+/** Keep a vote. False when the browser would not store it (the vote still counts). */
+export function rememberRating(key, stars, store = globalThis.localStorage) {
+  try {
+    store.setItem(RATE_STORE, JSON.stringify({ ...readRatings(store), [key]: stars }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The words a student last sent with a low score, by the same key, so a
+// changed vote reopens the box with them to edit instead of starting over.
+// Kept only in the student's own browser.
+export const RATE_NOTES = 'calcplex-rated-notes';
+
+/** The words this browser last sent with its vote on `key`, or ''. */
+export function ratedNote(key, store = globalThis.localStorage) {
+  const t = readRatings(store, RATE_NOTES)[key];
+  return typeof t === 'string' ? t.slice(0, FEEDBACK_MAX) : '';
+}
+
+/** Keep those words. False when the browser would not store them. */
+export function rememberRatingNote(key, text, store = globalThis.localStorage) {
+  try {
+    store.setItem(RATE_NOTES, JSON.stringify({ ...readRatings(store, RATE_NOTES), [key]: String(text).slice(0, FEEDBACK_MAX) }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // The feedback box under "Why did you delete it?" (It didn't work, Didn't like it):
