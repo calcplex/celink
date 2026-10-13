@@ -35,7 +35,25 @@ import {
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
-const INSTALLER = '/ti84plusce-jailbreak-installer/';
+// The script tag can set the page up for markup other than this site's own:
+// data-ce-page (hub, game or math, instead of reading it from the path),
+// data-ce-cards (the hub's cards), data-ce-title (a card's title),
+// data-ce-button (the element around a card's download link), data-ce-panel
+// (the element the connect panel goes before), data-ce-installer (the
+// jailbreak installer's address; one on another site opens in a new tab),
+// data-ce-prompt (the panel's sentence before a calculator is connected),
+// data-ce-split="off" (no arrow menu: the card's own download button until a
+// calculator is connected, then Send to calculator with a download link under
+// it; Delete is not offered) and data-ce-status="after" (a card's messages go
+// right after the card instead of inside it, marked data-slot with the card's
+// place among the cards beside it, so a stylesheet can lay them out).
+// With data-ce-split="off": data-ce-send-label (the Send button's words) and
+// data-ce-swap-download="off" (no download link under it; a student who wants
+// the file unplugs, or the download-first gate links it). data-ce-progress=
+// "bar" adds a bar under a card's Sending… line.
+const SETUP = document.querySelector('script[src*="/ce-send.mjs"]')?.dataset ?? {};
+const INSTALLER = SETUP.ceInstaller || '/ti84plusce-jailbreak-installer/';
+const INSTALLER_TARGET = /^https?:\/\//.test(INSTALLER) ? ' target="_blank" rel="noopener"' : '';
 const HUB = '/downloads/ti84plusce/games/';
 const MATH = '/downloads/ti84plusce/math/';
 
@@ -62,7 +80,7 @@ const deleteOn = () => !!DELETE_TAG && (page !== 'math' || !!OWN_URL);
 const byContent = () => false;
 
 const shortOs = os => String(os).split('.').slice(0, 3).join('.');
-const jailbreakLink = text => `<a href="${INSTALLER}">${text}</a>`;
+const jailbreakLink = text => `<a href="${INSTALLER}"${INSTALLER_TARGET}>${text}</a>`;
 // Send again inside a message: it runs the send of the card the message is
 // on, whatever that card's main button says at the time (one listener per card).
 const SEND_AGAIN_HTML = `<button type="button" class="ce-send-again">${esc(SEND_AGAIN.text)}</button>`;
@@ -219,7 +237,10 @@ const CHROMEOS_TEXT = {
 
 // This page's sentences by reason, the platform's own first. A function of
 // the page, which mount() sets after this module loads.
-const ownText = () => ({ ...OUTCOME_TEXT, link_lost: lostText(), timeout: lostText(), ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}) });
+// After a click through to an installer on another site, a refused open is
+// most likely that tab still holding the calculator: name it first.
+const INSTALLER_TAB_TEXT = { open_failed: "Couldn't connect. Close the jailbreak tab and anything else using the calculator (like TI Connect CE or another tab), unplug it and plug it back in, then try again." };
+const ownText = () => ({ ...OUTCOME_TEXT, link_lost: lostText(), timeout: lostText(), ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}), ...(wentToInstaller ? INSTALLER_TAB_TEXT : {}) });
 const errorText = err => pageErrorText(err, { page, own: ownText() });
 
 // One link per page, opened on the first click that needs it, or on load when
@@ -227,6 +248,10 @@ const errorText = err => pageErrorText(err, { page, own: ownText() });
 let page = 'game';
 let link = null, calc = null;
 let busy = false, connecting = false, present = false, sendAnyway = false;
+// The installer on another site opens in a new tab, and this tab's open link
+// would keep the calculator from it. A click on it lets the calculator go and
+// parks: no connecting on our own until the student clicks Connect again.
+let parked = false, wentToInstaller = false;
 const listeners = new Set();
 const changed = () => listeners.forEach(f => f());
 
@@ -236,7 +261,7 @@ async function refreshPresent() {
   } catch {
     present = false;
   }
-  if (present && !link && !busy && !connecting) {
+  if (present && !link && !busy && !connecting && !parked) {
     connecting = true;
     changed();
     try { await connect(() => {}, { quiet: true }); } catch { /* leaves the Connect button */ }
@@ -249,6 +274,7 @@ async function refreshPresent() {
 // ce_connect_fail event.
 async function connect(say, { quiet = false } = {}) {
   if (link) return calc;
+  if (!quiet) parked = false;
   if (!quiet && !(await askTIConnect())) throw refusal('CANCELLED', 'The TI Connect CE question was dismissed.');
   // Started, not awaited: the picker needs the click's permission, so nothing
   // is awaited before it.
@@ -309,6 +335,19 @@ if (navigator.usb?.addEventListener) {
   });
 }
 window.addEventListener('pagehide', () => { if (link) link.close().catch(() => {}); });
+if (INSTALLER_TARGET) {
+  document.addEventListener('click', e => {
+    const a = e.target.closest?.('a[href]');
+    if (!a || a.getAttribute('href') !== INSTALLER || !(link || present)) return;
+    parked = true;
+    wentToInstaller = true;
+    const l = link;
+    link = null;
+    calc = null;
+    if (l) l.close().catch(() => {});
+    changed();
+  }, true);
+}
 
 // `wire(dialog, done)` sets the buttons; Escape or a click outside resolves false.
 // Outside means on the backdrop, pressed and released there: a click on the
@@ -373,7 +412,7 @@ function askTIConnect() {
 async function askJailbreak() {
   const choice = await modal(`<h2>Jailbreak your calculator first</h2>
       <p>This calculator can't run games until it's jailbroken. It only takes a few minutes, and then every game here will work.</p>
-      <p class="ce-modal-actions"><a class="ce-modal-go" href="${INSTALLER}">Jailbreak it now</a>
+      <p class="ce-modal-actions"><a class="ce-modal-go" href="${INSTALLER}"${INSTALLER_TARGET}>Jailbreak it now</a>
       <button type="button" class="ce-modal-anyway">Send anyway</button></p>`,
   (d, done) => {
     d.querySelector('.ce-modal-go').addEventListener('click', () => done('installer'));
@@ -399,6 +438,8 @@ function verdict(c, where) {
 function statusHtml(where) {
   if (link && calc) return verdict(calc, where);
   if (connecting) return 'Connecting to your calculator…';
+  if (parked && where.startsWith('Pick')) return 'When you’re done jailbreaking, connect your calculator again.';
+  if (SETUP.cePrompt && where.startsWith('Pick')) return esc(SETUP.cePrompt);
   return `Plug in your TI-84 Plus CE, turn it on, and click ${where.startsWith('Pick') ? 'Connect' : 'Send to calculator'} to install ${page === 'math' ? 'programs' : 'games'}.`;
 }
 
@@ -436,7 +477,7 @@ async function run({ file, label, say, show }) {
       if (choice !== 'send_anyway') return;
       sendAnyway = true;
     }
-    const sending = pct => say(`Sending ${label} to your calculator… ${pct}%`);
+    const sending = pct => say(`Sending ${label} to your calculator… ${pct}%`, pct);
     sending(0);
     let r;
     try {
@@ -1025,12 +1066,12 @@ function wireSplit(split, mode, { send, remove }) {
 
 function mountHub() {
   const what = page === 'math' ? 'program' : 'game';
-  const cards = [...document.querySelectorAll('.entry-content .wp-block-media-text')]
+  const cards = [...document.querySelectorAll(SETUP.ceCards || '.entry-content .wp-block-media-text')]
     .map(card => ({ card, a: card.querySelector('a[href^="/downloads/ce/"]') }))
     .filter(x => x.a && /\.(8xg|8xp|zip)$/i.test(x.a.getAttribute('href')));
   if (!cards.length) return;
   watchDownloads(document);
-  mountPanel(cards[0].card, `Pick a ${what} below and click Send to calculator.`);
+  mountPanel((SETUP.cePanel && cards[0].card.closest(SETUP.cePanel)) || cards[0].card, `Pick a ${what} below and click ${esc(SETUP.ceSendLabel || 'Send to calculator')}${/[.!?]$/.test(SETUP.ceSendLabel || '') ? '' : '.'}`);
   for (const { card, a } of cards) mountSplit(card, a);
   changed();
 }
@@ -1065,24 +1106,29 @@ function mountPanel(before, where) {
 // on). The arrow offers the rest.
 function mountSplit(card, a) {
   const file = decodedHref(a);
-  const label = (card.querySelector('h2')?.textContent || '').trim() || (page === 'math' ? 'This program' : 'This game');
-  const old = a.closest('.wp-block-button');
+  const label = (card.querySelector(SETUP.ceTitle || 'h2')?.textContent || '').trim() || (page === 'math' ? 'This program' : 'This game');
+  const old = a.closest(SETUP.ceButton || '.wp-block-button') || a;
   const href = esc(a.getAttribute('href'));
+  const swap = SETUP.ceSplit === 'off';
   const split = document.createElement('div');
-  split.className = 'wp-block-button floated ce-split';
+  split.className = swap ? 'ce-swap' : 'wp-block-button floated ce-split';
   old.after(split);
-  old.style.display = 'none';
+  if (!swap) old.style.display = 'none';
   const status = document.createElement('div');
   status.className = 'ce-card-status';
   status.setAttribute('role', 'status');
-  [...card.querySelectorAll('.wp-block-button.floated')].at(-1).after(status);
+  if (SETUP.ceStatus === 'after') {
+    const beside = [...card.parentElement.children].filter(el => el.matches(SETUP.ceCards || '.entry-content .wp-block-media-text') && el.querySelector('a[href^="/downloads/ce/"]'));
+    status.dataset.slot = String(beside.indexOf(card));
+    card.after(status);
+  } else [...card.querySelectorAll('.wp-block-button.floated')].at(-1).after(status);
   const show = (html, kind) => {
     status.innerHTML = html && kind !== 'busy' ? CLOSE_X + html : html;
     status.className = `ce-card-status is-${kind}`;
     return status;
   };
-  const say = t => {
-    if (t) show(`<p>${esc(t)}</p>`, 'busy');
+  const say = (t, pct) => {
+    if (t) show(`<p>${esc(t)}</p>` + (pct != null && SETUP.ceProgress === 'bar' ? `<div class="ce-bar"><span style="width:${Math.max(0, Math.min(100, pct))}%"></span></div>` : ''), 'busy');
     else if (status.classList.contains('is-busy')) show('', '');
   };
   const send = () => {
@@ -1097,8 +1143,10 @@ function mountSplit(card, a) {
   let mode = '';
   // The math hub has no games list, so its few small downloads say what each card sends.
   const here = presence(file, label, () => paint(), { fetchGame: page === 'math' });
-  const rate = mountRate(status, { file, label, demo: DEMO_RATE && card === document.querySelector('.wp-block-media-text') });
+  // Send-only cards (data-ce-split="off") never offer stars, so they get no row.
+  const rate = swap ? () => {} : mountRate(status, { file, label, demo: DEMO_RATE && card === document.querySelector('.wp-block-media-text') });
   const paint = () => {
+    if (swap) return paintSwap();
     const want = !(link && calc) ? 'download' : here() ? 'delete' : 'send';
     rate(want === 'delete');
     if (want !== mode) {
@@ -1108,6 +1156,20 @@ function mountSplit(card, a) {
       wireSplit(split, mode, { send, remove });
     }
     // The connect on load opens the calculator too: a click then would open it twice.
+    split.querySelectorAll('button').forEach(b => { b.disabled = busy || connecting; });
+  };
+  // Without the arrow: the page's own button until a calculator is connected,
+  // then Send to calculator in the same button style, a download link under it.
+  const paintSwap = () => {
+    const want = link && calc ? 'send' : 'download';
+    if (want !== mode) {
+      mode = want;
+      old.style.display = mode === 'send' ? 'none' : '';
+      split.hidden = mode !== 'send';
+      split.innerHTML = mode !== 'send' ? '' : `<button type="button" class="ce-swap-send ${esc(a.className)}">${esc(SETUP.ceSendLabel || 'Send to calculator')}</button>`
+        + (SETUP.ceSwapDownload === 'off' ? '' : `<a class="ce-swap-dl" href="${href}"${downloadLinkAttrs()}>Download file</a>`);
+      split.querySelector('.ce-swap-send')?.addEventListener('click', send);
+    }
     split.querySelectorAll('button').forEach(b => { b.disabled = busy || connecting; });
   };
   listeners.add(paint);
@@ -1140,7 +1202,7 @@ function mount() {
   const at = path => here === path || here === path + 'index.html';
   // A tag that carries the math list makes this the math page wherever it is
   // served, so its Delete can only go by content.
-  page = OWN_URL ? 'math' : at(HUB) ? 'hub' : at(MATH) ? 'math' : 'game';
+  page = OWN_URL ? 'math' : ['hub', 'game', 'math'].includes(SETUP.cePage) ? SETUP.cePage : at(HUB) ? 'hub' : at(MATH) ? 'math' : 'game';
   watchHelp(document);
   watchFeedback(document);
   watchMenus();
