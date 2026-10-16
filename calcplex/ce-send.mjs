@@ -20,6 +20,8 @@
 // one this page just sent) gets "Played it? Rate it:" ("Used it?" on the math
 // page) and five stars under its card.
 // Without WebUSB, or on a phone, the page keeps its download buttons only.
+// Another script on the page (a help panel, say) can follow what is on the
+// connected calculator: see announceContents below.
 // The page's build puts the connect panel in the HTML (#ce-conn) in the
 // words painted first here, so nothing pops in when this loads; where
 // this would not mount, <html> is ce-nosend and the panel shows a one-line note.
@@ -31,7 +33,8 @@ import {
   DELETE_REASONS, FEEDBACK_FORM, FEEDBACK_MAX, FIND_HELP_OPEN, PREVIEW_HOST, RATE_ASK_AT, RATE_STARS, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
   jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
   sendFeedback, startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
-  rateParams, ratedNote, ratedStars, rememberRating, rememberRatingNote,
+  rateParams, ratedNote, ratedStars, rememberRating, rememberRatingNote, evoAddress, evoHtml, evoText, isEvoDevice,
+  openDetail, tabHandoff, TAB_BUSY_TEXT,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
@@ -41,6 +44,8 @@ import { CELink } from '../celink.mjs';
 // data-ce-button (the element around a card's download link), data-ce-panel
 // (the element the connect panel goes before), data-ce-installer (the
 // jailbreak installer's address; one on another site opens in a new tab),
+// data-ce-evo (the address of the site's TI-84 Evo page, linked when the
+// student picks an Evo; one on another site opens in a new tab),
 // data-ce-prompt (the panel's sentence before a calculator is connected),
 // data-ce-split="off" (no arrow menu: the card's own download button until a
 // calculator is connected, then Send to calculator with a download link under
@@ -50,7 +55,8 @@ import { CELink } from '../celink.mjs';
 // With data-ce-split="off": data-ce-send-label (the Send button's words) and
 // data-ce-swap-download="off" (no download link under it; a student who wants
 // the file unplugs, or the download-first gate links it). data-ce-progress=
-// "bar" adds a bar under a card's Sending… line.
+// "bar" adds a bar under a card's Sending… line. data-ce-ram is the address of
+// the measured free RAM each game needs to start (gamesend's ramToStart).
 const SETUP = document.querySelector('script[src*="/ce-send.mjs"]')?.dataset ?? {};
 const INSTALLER = SETUP.ceInstaller || '/ti84plusce-jailbreak-installer/';
 const INSTALLER_TARGET = /^https?:\/\//.test(INSTALLER) ? ' target="_blank" rel="noopener"' : '';
@@ -174,6 +180,23 @@ function loadOwn() {
   return ownList;
 }
 
+// The measured free RAM to start, { NAME: { size, ram } }, read once per
+// page and started with the first send. A failed fetch is forgotten, so the
+// next send tries again; one that has not come in 5 s counts as none, and the
+// send warns by its own estimate.
+let ramList = null;
+function loadRam() {
+  if (!ramList) {
+    const list = SETUP.ceRam
+      ? fetch(SETUP.ceRam).then(r => { if (!r.ok) throw refusal('FETCH', 'no RAM list'); return r.json(); })
+        .then(l => (l && typeof l === 'object' && !Array.isArray(l) ? l : {}))
+      : Promise.resolve({});
+    ramList = list;
+    list.catch(() => { if (ramList === list) ramList = null; });
+  }
+  return ramList;
+}
+
 // `promise`, or a rejection once `ms` have passed.
 const capped = (promise, ms) => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('too slow')), ms);
@@ -183,6 +206,7 @@ const capped = (promise, ms) => new Promise((resolve, reject) => {
 // A list that has not come in 5 s counts as none, so a slow fetch only ever
 // costs the Delete, never a message.
 const ownNow = () => capped(loadOwn(), 5000).catch(() => []);
+const ramNow = () => capped(loadRam(), 5000).catch(() => ({}));
 const mathEntry = async file => (await ownNow()).find(e => e.file === file) ?? null;
 
 // Whether a download's game is on the calculator, by planDelete's
@@ -228,9 +252,15 @@ const OUTCOME_TEXT = {
   open_failed: "Couldn't connect. Close anything else using the calculator (like TI Connect CE or another tab), unplug it and plug it back in, then try again.",
   calc_busy: 'The calculator is busy. Press clear a few times to get back to the home screen, then try again.',
 };
+// On Windows a claim the browser refuses is TI Connect CE or another tab
+// holding the calculator. An open refused for security is a driver the
+// browser can't open the calculator through, which the latest TI Connect CE
+// replaces.
 const WINDOWS_TEXT = {
-  no_device: 'Calculator not in the list? On Windows it only shows up once TI Connect CE is installed. If it is, make sure the calculator is on, then try again.',
+  no_device: 'Calculator not in the list? On Windows it only shows up once TI Connect CE is installed. If it is, update it to the latest version from TI, make sure the calculator is on, then try again.',
+  open_failed: "Couldn't connect. Close TI Connect CE and any other tab using the calculator, unplug it and plug it back in, then try again.",
 };
+const WINDOWS_SECURITY_TEXT = "Windows won't let the page use the calculator yet. Update TI Connect CE to the latest version from TI, then unplug the calculator, plug it back in and try again.";
 const CHROMEOS_TEXT = {
   open_failed: "Couldn't connect. Close any other tab using the calculator, unplug it and plug it back in, then try again. Some school Chromebooks don't let websites use USB devices, so if it keeps failing, try a Windows or Mac computer.",
 };
@@ -240,8 +270,10 @@ const CHROMEOS_TEXT = {
 // After a click through to an installer on another site, a refused open is
 // most likely that tab still holding the calculator: name it first.
 const INSTALLER_TAB_TEXT = { open_failed: "Couldn't connect. Close the jailbreak tab and anything else using the calculator (like TI Connect CE or another tab), unplug it and plug it back in, then try again." };
-const ownText = () => ({ ...OUTCOME_TEXT, link_lost: lostText(), timeout: lostText(), ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}), ...(wentToInstaller ? INSTALLER_TAB_TEXT : {}) });
-const errorText = err => pageErrorText(err, { page, own: ownText() });
+const ownText = err => ({ ...OUTCOME_TEXT, link_lost: lostText(), timeout: lostText(), evo: evoText(page), ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}), ...(wentToInstaller ? INSTALLER_TAB_TEXT : {}), ...(WIN && openDetail(err) === 'open_security' ? { open_failed: WINDOWS_SECURITY_TEXT } : {}) });
+const errorText = err => pageErrorText(err, { page, own: ownText(err) });
+// errorText as HTML: a TI-84 Evo gets a link to the site's Evo page.
+const errorHtml = err => (failReason(err) === 'evo' ? evoHtml(page, evoAddress(page, SETUP.ceEvo)) : esc(errorText(err)));
 
 // One link per page, opened on the first click that needs it, or on load when
 // the browser already allowed a plugged-in calculator on this site.
@@ -251,17 +283,45 @@ let busy = false, connecting = false, present = false, sendAnyway = false;
 // The installer on another site opens in a new tab, and this tab's open link
 // would keep the calculator from it. A click on it lets the calculator go and
 // parks: no connecting on our own until the student clicks Connect again.
-let parked = false, wentToInstaller = false;
+// Another tab of this site taking the calculator parks this one too
+// (`handoff`); `parkedFor` is who took it: 'installer' or 'page'.
+let parked = false, wentToInstaller = false, parkedFor = '';
 const listeners = new Set();
-const changed = () => listeners.forEach(f => f());
+// Only one tab can hold the calculator. A Connect click asks this site's other
+// tabs to let it go first; one that is sending or deleting keeps it, and the
+// click says to wait. This tab lets it go the same way: never mid-job, and
+// then it parks.
+const handoff = tabHandoff({
+  holding: () => !!link,
+  busy: () => busy,
+  park: who => {
+    parked = true;
+    parkedFor = who;
+    changed();
+  },
+  release: async () => {
+    const l = link;
+    link = null;
+    calc = null;
+    if (l) await l.close().catch(() => {});
+    changed();
+  },
+});
+const changed = () => {
+  handoff.held(!!link);
+  listeners.forEach(f => f());
+};
 
 async function refreshPresent() {
   try {
-    present = (await CELink.granted()).length > 0;
+    // A TI-84 Evo the student once picked is not a calculator to connect to.
+    present = (await CELink.granted()).some(d => !isEvoDevice(d));
   } catch {
     present = false;
   }
-  if (present && !link && !busy && !connecting && !parked) {
+  // Never while another tab of this site holds it: that tab keeps it.
+  const free = () => present && !link && !busy && !connecting && !parked;
+  if (free() && !(await handoff.othersHold()) && free()) {
     connecting = true;
     changed();
     try { await connect(() => {}, { quiet: true }); } catch { /* leaves the Connect button */ }
@@ -274,7 +334,10 @@ async function refreshPresent() {
 // ce_connect_fail event.
 async function connect(say, { quiet = false } = {}) {
   if (link) return calc;
-  if (!quiet) parked = false;
+  if (!quiet) {
+    parked = false;
+    parkedFor = '';
+  }
   if (!quiet && !(await askTIConnect())) throw refusal('CANCELLED', 'The TI Connect CE question was dismissed.');
   // Started, not awaited: the picker needs the click's permission, so nothing
   // is awaited before it.
@@ -283,11 +346,16 @@ async function connect(say, { quiet = false } = {}) {
   let l;
   try {
     l = await pickCalculator();
+    // After the picker, which needs the click's permission: a calculator
+    // another tab holds is one this site was allowed, so no picker shows.
+    if (!quiet && (await handoff.claim()) === 'busy') throw refusal('TAB_BUSY', TAB_BUSY_TEXT);
     say('Connecting to your calculator…');
     await l.open();
     // No list in 5 s means no Delete this time, never a slower connect.
     const own = pending ? await capped(pending, 5000).catch(() => []) : [];
     calc = await inspect(l, { own });
+    // Another tab's Connect click came while this one connected on its own.
+    if (quiet && parked) throw refusal('CANCELLED', 'Another tab took the calculator.');
   } catch (err) {
     if (l) await l.close().catch(() => {});
     calc = null;
@@ -296,8 +364,39 @@ async function connect(say, { quiet = false } = {}) {
   }
   link = l;
   track('ce_calc_info', { ...calcParams(calc), route: calc.route, page, jb: jailbreakState(calc.route, calc.tools) });
+  await announceContents({ fresh: false });
   refreshPresent();
   return calc;
+}
+
+// What is on the calculator, for another script on the page: with
+// window.ceSendContents set to true before a listing is taken (at connect,
+// after a send, after a delete), the page reads the free memory again and
+// dispatches 'ce-send:contents' on window, detail { ramFree, archiveFree,
+// rows }: free bytes as read (null when the calculator refused the read),
+// and the listing's rows { name, type, typeName, size, archived }. The event stays in the page; nothing here sends it
+// anywhere. Without the flag nothing extra is read and no event goes out.
+const contentsWatched = () => typeof window !== 'undefined' && window.ceSendContents === true;
+async function announceContents({ fresh = true } = {}) {
+  if (!contentsWatched() || !link || !calc) return;
+  if (fresh) {
+    let free = { ramFree: null, archiveFree: null }; // a refused read: not known now
+    try {
+      const i = await readyEach(link).info();
+      free = { ramFree: i.ramFree, archiveFree: i.archiveFree };
+    } catch (err) {
+      if (linkDead(err)) {
+        await drop();
+        return;
+      }
+    }
+    if (calc) Object.assign(calc, free);
+  }
+  if (!calc) return;
+  try {
+    const rows = (calc.rows ?? []).map(r => ({ name: r.name, type: r.type, typeName: r.typeName, size: r.size, archived: r.archived }));
+    window.dispatchEvent(new CustomEvent('ce-send:contents', { detail: { ramFree: calc.ramFree, archiveFree: calc.archiveFree, rows } }));
+  } catch { /* a listener never breaks the page */ }
 }
 
 // A Connect button: connect, and hand any failure but a dismissed question to
@@ -334,12 +433,16 @@ if (navigator.usb?.addEventListener) {
     else refreshPresent();
   });
 }
-window.addEventListener('pagehide', () => { if (link) link.close().catch(() => {}); });
+window.addEventListener('pagehide', () => {
+  if (link) link.close().catch(() => {});
+  handoff.held(false);
+});
 if (INSTALLER_TARGET) {
   document.addEventListener('click', e => {
     const a = e.target.closest?.('a[href]');
     if (!a || a.getAttribute('href') !== INSTALLER || !(link || present)) return;
     parked = true;
+    parkedFor = 'installer';
     wentToInstaller = true;
     const l = link;
     link = null;
@@ -435,9 +538,11 @@ function verdict(c, where) {
   }
 }
 
+const IN_OTHER_TAB = 'Your calculator is connected in another tab. Click Connect to use it here.';
 function statusHtml(where) {
   if (link && calc) return verdict(calc, where);
   if (connecting) return 'Connecting to your calculator…';
+  if (parked && parkedFor === 'page') return IN_OTHER_TAB;
   if (parked && where.startsWith('Pick')) return 'When you’re done jailbreaking, connect your calculator again.';
   if (SETUP.cePrompt && where.startsWith('Pick')) return esc(SETUP.cePrompt);
   return `Plug in your TI-84 Plus CE, turn it on, and click ${where.startsWith('Pick') ? 'Connect' : 'Send to calculator'} to install ${page === 'math' ? 'programs' : 'games'}.`;
@@ -462,6 +567,7 @@ async function run({ file, label, say, show }) {
   }
   busy = true;
   changed();
+  const launchRam = ramNow();
   try {
     const c = await connect(say);
     say(`Getting ${label}…`);
@@ -483,7 +589,8 @@ async function run({ file, label, say, show }) {
     try {
       r = await sendGame(link, files, {
         verify: 'full',
-        archive: archiveMode(page),
+        archive: archiveMode(page, main?.name),
+        launchRam: await launchRam,
         onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); },
       });
     } catch (err) {
@@ -491,7 +598,7 @@ async function run({ file, label, say, show }) {
       if (linkDead(err)) await drop();
       // A send that stopped part way may have left files, which Delete offers to remove.
       // On the math page a copy it may have changed is no longer known to be ours.
-      else if (deleteOn()) {
+      else if (deleteOn() || contentsWatched()) {
         if (calc) calc.owned = ownedAfterFailedSend(calc.owned, err, entries.map(e => e.name));
         await refreshRows();
       }
@@ -506,7 +613,7 @@ async function run({ file, label, say, show }) {
       const owned = await ownedAfterSend(calc?.owned, r, entries, await ownNow());
       if (calc) calc.owned = owned;
     }
-    if (deleteOn()) await refreshRows();
+    if (deleteOn() || contentsWatched()) await refreshRows();
     say('');
     show(sentHtml(r, main, asm, c), 'ok');
   } catch (err) {
@@ -519,7 +626,7 @@ async function run({ file, label, say, show }) {
     // every message on a game the calculator has: its main button is Delete.
     const again = asksSendAgain(err)
       || (deleteOn() && link && calc ? await gameOnCalculator(file, label, calc.rows, { fetchGame: page === 'game' }).catch(() => false) : false);
-    const text = `<p>${esc(errorText(err))}${again ? ` ${SEND_AGAIN_HTML}` : ''}</p>`;
+    const text = `<p>${errorHtml(err)}${again ? ` ${SEND_AGAIN_HTML}` : ''}</p>`;
     if (games) {
       const list = spaceList({ memory, lastReason: failReason(err), sending: file, sendingLabel: label, games, calc: refusedBy, say, show });
       list.wire(show(text + list.html, 'bad'));
@@ -547,7 +654,9 @@ async function refreshRows() {
     }
   } catch (err) {
     if (linkDead(err)) await drop();
+    return;
   }
+  await announceContents();
 }
 
 let helpPanels = 0;
@@ -573,7 +682,12 @@ function sentHtml(r, main, asm, c) {
     html.push(`<p><strong>Sent!</strong> To ${page === 'math' ? 'run' : 'play'} it, ${lower}</p>`);
   }
   for (const w of r.warnings) {
-    if (w.code === 'LOW_RAM_TO_RUN') html.push(`<p>Your calculator is low on RAM (${w.freeKB} KB free), so the ${page === 'math' ? 'program' : 'game'} may stop with ERR:MEMORY. Delete or archive a few programs you don't need (2nd, +, 2: Mem Management).</p>`);
+    if (w.code !== 'LOW_RAM_TO_RUN') continue;
+    const what = page === 'math' ? 'program' : 'game';
+    // A measured figure is worth naming; the estimate is only a lower bound.
+    html.push(w.measured
+      ? `<p>Your calculator is low on RAM (${w.freeKB} KB free) and this ${what} needs about ${w.needKB} KB to start, so it may stop with ERR:MEMORY. Delete or archive about ${w.shortKB} KB of programs you don't need (2nd, +, 2: Mem Management).</p>`
+      : `<p>Your calculator is low on RAM (${w.freeKB} KB free), so the ${what} may stop with ERR:MEMORY. Delete or archive a few programs you don't need (2nd, +, 2: Mem Management).</p>`);
   }
   return html.join('');
 }
@@ -824,6 +938,7 @@ async function removeGame({ file, label, say, show, space = null }) {
       calc.owned = ownedAfterDelete(calc.owned, r);
       calc.rows = r.rows;
     }
+    await announceContents();
     say('');
     if (r.deleted.length) {
       track('ce_delete', deleteParams({ ...from, game, outcome: 'deleted', bytes: r.bytes }));
@@ -840,7 +955,7 @@ async function removeGame({ file, label, say, show, space = null }) {
     track('ce_delete', deleteParams({ ...from, game, outcome: 'failed', err }));
     if (linkDead(err)) await drop();
     else await refreshRows();
-    outcome(`<p>${esc(err?.code === 'READBACK' ? `${label} is still on your calculator. Try again.` : errorText(err))}</p>`, 'bad');
+    outcome(`<p>${err?.code === 'READBACK' ? esc(`${label} is still on your calculator. Try again.`) : errorHtml(err)}</p>`, 'bad');
   } finally {
     busy = false;
     changed();
@@ -978,7 +1093,7 @@ function mountGame() {
       return;
     }
     clearResult();
-    await connectFromClick(say, err => show(`<p>${esc(errorText(err))}</p>`, 'bad'));
+    await connectFromClick(say, err => show(`<p>${errorHtml(err)}</p>`, 'bad'));
     say('');
   };
   const remove = () => removeGame({ file, label, say, show });
@@ -995,7 +1110,7 @@ function mountGame() {
     rate(onCalc);
     msg.innerHTML = connected || connecting
       ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : 'Click Send to calculator to install it.')
-      : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
+      : parked && parkedFor === 'page' ? IN_OTHER_TAB : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
     const kind = statusKind();
     card.className = 'ce-conn is-leaf' + (kind ? ' ' + kind : outcome === 'bad' ? ' bad' : '');
     const want = !connected ? 'connect' : onCalc ? 'delete' : 'send';
@@ -1081,6 +1196,7 @@ function mountPanel(before, where) {
   const panel = built || document.createElement('div');
   panel.setAttribute('role', 'status');
   if (!built) before.before(panel);
+  // HTML, from errorHtml.
   let panelError = '';
   listeners.add(() => {
     const kind = statusKind();
@@ -1090,13 +1206,13 @@ function mountPanel(before, where) {
       return;
     }
     panel.innerHTML = `<p class="msg">${statusHtml(where)}</p>
-      ${panelError ? `<p class="msg err">${esc(panelError)}</p>` : ''}
+      ${panelError ? `<p class="msg err">${panelError}</p>` : ''}
       <button type="button" class="ce-conn-go"${busy ? ' disabled' : ''}>Connect your calculator</button>`;
     const button = panel.querySelector('.ce-conn-go');
     button.onclick = () => {
       if (busy) return;
       panelError = '';
-      connectFromClick(t => { button.textContent = t; button.disabled = true; }, err => { panelError = errorText(err); }, { repaint: false });
+      connectFromClick(t => { button.textContent = t; button.disabled = true; }, err => { panelError = errorHtml(err); }, { repaint: false });
     };
   });
 }

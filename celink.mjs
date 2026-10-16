@@ -15,6 +15,9 @@
 import { TYPE, typeName, nameToBytes, nameToString } from './tifiles.mjs';
 
 export const TI_VENDOR_ID = 0x0451;
+// The TI-84 Evo shares the vendor id but is a USB serial (CDC-ACM) device:
+// interface 0 is its control interface and there is no CE link to talk to.
+export const EVO_PRODUCT_ID = 0xE018;
 
 const RAW = Object.freeze({ BUF_REQ: 1, BUF_ALLOC: 2, DATA: 3, DATA_LAST: 4, ACK: 5 });
 
@@ -442,11 +445,16 @@ export class CELink {
 
   /**
    * Claim interface 0 of configuration 1; call ready() before the first
-   * operation. Throws OPEN_FAILED with `step` (open, config, claim) and the
+   * operation. Throws TI84_EVO, without opening the device, for a TI-84 Evo.
+   * Throws OPEN_FAILED with `step` (open, config, claim) and the
    * WebUSB error as `cause` when WebUSB refuses, leaving the link closed.
    */
   async open() {
     const d = this.device;
+    // Before d.open(), so no platform open or claim error can come first.
+    if (d.productId === EVO_PRODUCT_ID) {
+      throw new CELinkError('TI84_EVO', 'This is a TI-84 Evo. It does not take TI-84 Plus CE files.');
+    }
     let step = 'open';
     try {
       if (!d.opened) await d.open();

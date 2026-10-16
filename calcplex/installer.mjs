@@ -11,8 +11,8 @@ import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
   INEQUALZ_URL, LEAVE_SHELL_KEY, OFFICIAL, PREVIEW_HOST, ROUTES, RUNNING_TEXT, TICONNECT_URL, archiveMode, calcParams, compatibility, esc,
   fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, isChromeOS, isWindows, keyHelpHtml, linkDead, mountKeyHelp,
-  needsAsm, officialFiles, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable, startHint,
-  stepTracker, track, trackConnectFail, unknownRefusal,
+  needsAsm, officialFiles, openDetail, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable, startHint,
+  stepTracker, tabHandoff, track, trackConnectFail, unknownRefusal, TAB_BUSY_TEXT,
 } from './core.mjs';
 import { CELinkError } from '../celink.mjs';
 
@@ -345,16 +345,26 @@ function paint(body, step, screen) {
 }
 
 // On Windows, no_device is usually an empty picker (no TI Connect CE driver)
-// and open_failed a running TI Connect CE holding the port.
+// and open_failed a running TI Connect CE or another tab holding the port.
+// open_security, an open refused for security, is a driver the browser can't
+// open the calculator through, which the latest TI Connect CE replaces.
 const WINDOWS_OUTCOME_HTML = {
   no_device: `<p><strong>Calculator not in the list?</strong> On Windows it only shows up once
-    TI Connect CE is installed. If it is installed, check that the calculator is on and
-    plugged in, then press Connect calculator again.</p>
+    TI Connect CE is installed. If it is installed, update it to the latest version from TI,
+    check that the calculator is on and plugged in, then press Connect calculator again.</p>
     <p><button type="button" class="cec-inline" data-go="install">Install TI Connect CE</button></p>`,
   open_failed: `<p><strong>TI Connect CE is probably still open.</strong> Windows lets only one
-    program use the calculator at a time. Close TI Connect CE, unplug the calculator, plug it
-    back in, then press Connect calculator again.</p>`,
+    program use the calculator at a time. Close TI Connect CE and any other tab using the
+    calculator, unplug the calculator, plug it back in, then press Connect calculator again.</p>`,
+  open_security: `<p><strong>Windows won't let this page use the calculator yet.</strong> Update
+    TI Connect CE to the <a href="${TICONNECT_URL}" target="_blank" rel="noopener nofollow">latest version from TI</a>,
+    then unplug the calculator, plug it back in and press Connect calculator again.</p>`,
 };
+// The Windows box for an error: open_security has its own.
+const windowsKey = (err, reason) => (reason === 'open_failed' && openDetail(err) === 'open_security' ? 'open_security' : reason);
+// A TI-84 Evo shares TI's vendor id, so it shows in the device list.
+const EVO = '/ti84evo-jailbreak/';
+const EVO_OUTCOME_HTML = `<p>That's a TI-84 Evo. This jailbreak is only for the TI-84 Plus CE, and there is no jailbreak for the Evo yet. <a href="${EVO}">What your Evo can run</a></p>`;
 const CHROMEOS_OUTCOME_TEXT = {
   open_failed: "Couldn't connect. Close any other tab using the calculator, unplug it and plug it back in, then press Connect calculator again. Some school Chromebooks don't let websites use USB devices, so if it keeps failing, try a Windows or Mac computer.",
 };
@@ -366,8 +376,10 @@ function fail(err) {
   state.lastReason = reason;
   if (programRunning(err)) {
     el.textContent = RUNNING_TEXT;
-  } else if (onWindows() && WINDOWS_OUTCOME_HTML[reason]) {
-    el.innerHTML = WINDOWS_OUTCOME_HTML[reason];
+  } else if (reason === 'evo') {
+    el.innerHTML = EVO_OUTCOME_HTML;
+  } else if (onWindows() && WINDOWS_OUTCOME_HTML[windowsKey(err, reason)]) {
+    el.innerHTML = WINDOWS_OUTCOME_HTML[windowsKey(err, reason)];
     const go = el.querySelector('[data-go="install"]');
     if (go) go.onclick = () => { if (!state.busy) viewInstallTIConnect(); };
   } else {
@@ -395,6 +407,7 @@ async function work(fn) {
     root().querySelectorAll('button, input').forEach(b => { b.disabled = false; });
     root().querySelectorAll('.cec-walk').forEach(w => w._sync?.());
     state.afterWork?.();
+    handoff.held(holds());
   }
 }
 
@@ -470,7 +483,7 @@ function viewConnect() {
   $('#cec-go').onclick = () => work(async () => {
     say('Pick your calculator in the browser window that opens.');
     try {
-      state.info = transport.info && !transport.poisoned ? transport.info : await transport.connect();
+      state.info = transport.info && !transport.poisoned ? transport.info : await transport.connect({ beforeOpen: claim });
     } catch (err) {
       trackConnectFail(err);
       throw err;
@@ -862,10 +875,32 @@ async function gameLink() {
   if (transport.link && !transport.poisoned) return transport.link;
   if (!playLink) {
     const link = await pickCalculator();
+    await claim();
     await link.open();
     playLink = link;
   }
   return playLink;
+}
+
+// Only one tab can hold the calculator. Before this page opens it, the site's
+// other tabs are asked to let it go (core's tabHandoff); one that is sending
+// or deleting keeps it, and the click says to wait. This page lets it go the
+// same way, never while it works, and then needs a reload, as after an unplug.
+const holds = () => !!((transport.link?.opened && !transport.poisoned) || playLink);
+const handoff = tabHandoff({
+  who: 'installer',
+  holding: holds,
+  busy: () => state.busy,
+  release: async () => {
+    const links = [transport.link, playLink];
+    if (transport.link) transport.poisoned = true;
+    playLink = null;
+    await Promise.all(links.map(l => l?.close().catch(() => {})));
+    say('Another tab is using the calculator now. To carry on here, close that tab and reload this page.');
+  },
+});
+async function claim() {
+  if ((await handoff.claim()) === 'busy') throw refusal('TAB_BUSY', TAB_BUSY_TEXT);
 }
 // Send `game`, archived where the OS starts archived programs. Resolves
 // sendGame's result.
@@ -879,7 +914,7 @@ async function sendGameTo(game) {
     const bytes = new Uint8Array(await response.arrayBuffer());
     say(`Sending ${game.label}. Leave the cable alone until it finishes.`);
     const r = await sendGame(link, [bytes], {
-      archive: archiveMode('installer'),
+      archive: archiveMode('installer', game.name),
       onProgress: (done, total) => { if (total) say(`Sending ${game.label}. Leave the cable alone until it finishes. ${Math.min(99, Math.round(done / total * 100))}%`); },
     });
     const outcome = r.replaced.length ? 'replaced' : 'sent';
@@ -1011,12 +1046,14 @@ function boot() {
   // Release the calculator on leaving, so the games hub in the same tab can open it.
   window.addEventListener('pagehide', () => {
     for (const l of [transport.link, playLink]) if (l) l.close().catch(() => {});
+    handoff.held(false);
   });
   navigator.usb.addEventListener('disconnect', e => {
     if (e.device === transport.device && !transport.poisoned) {
       transport.poisoned = true;
       say('The calculator was unplugged. Plug it back in and reload this page.');
     }
+    handoff.held(holds());
   });
   if (onWindows()) viewWindowsCheck(); else viewConnect();
 }

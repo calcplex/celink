@@ -111,6 +111,8 @@ export class SimulatedCalculator {
     renegotiate = null,         // { afterPackets, size }: ask for a new buffer size mid-stream
     lowBattery = false,         // refuse an application send with 0x002B
     refuse = null,              // { step, code, times }: answer that step with an error (steps in STEPS)
+    emptyOnFull = false,        // an archived send refused for space leaves an empty variable in RAM
+                                // under its name, as observed in an emulator running OS 5.8.5
     running = false,            // a program running on the calculator; settable at any time
     leftovers = [],             // raw packets { type, data } sent before the answer to the next Buffer Size
                                 // Request, as an earlier exchange might leave; never observed on hardware
@@ -146,6 +148,7 @@ export class SimulatedCalculator {
     this.renegotiate = renegotiate;
     this.lowBattery = lowBattery;
     this.refuse = refuse && { times: Infinity, ...refuse };
+    this.emptyOnFull = emptyOnFull;
     this.running = running;
     this.leftovers = [...leftovers];
     this.vars = new Map();
@@ -680,7 +683,10 @@ export class SimulatedCalculator {
     const old = this.get(name, type);
     const freeRam = this.ramFree + (old && !old.archived ? old.data.length + 9 : 0);
     const freeArchive = this.archiveFree + (old?.archived ? old.data.length + 17 : 0);
-    if (archived ? size + 17 > freeArchive : size + 9 > freeRam) return this._queueError(SIM_ERR.NO_MEMORY);
+    if (archived ? size + 17 > freeArchive : size + 9 > freeRam) {
+      if (archived && this.emptyOnFull && !old) this._store(name, type, new Uint8Array(2), false, version ? version[3] : 0);
+      return this._queueError(SIM_ERR.NO_MEMORY);
+    }
     this._expectContents({ name, type, size, archived, version: version ? version[3] : 0 });
     this.queueVirtual(0xAA00, [0x01]);
   }

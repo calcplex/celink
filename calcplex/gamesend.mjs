@@ -4,7 +4,7 @@
 // Sending a game to a TI-84 Plus CE: every file of it, every time, libraries
 // first, after a space check, with each variable read back. The pages own the
 // words on screen; this module owns what goes over the cable.
-import { NAMED, compatibility, digest, isCE, launchesArchived, programRunning, refusal } from './core.mjs';
+import { NAMED, compatibility, digest, isCE, isEvoDevice, launchesArchived, programRunning, refusal } from './core.mjs';
 import { CELink } from '../celink.mjs';
 import { parseFile, TYPE } from '../tifiles.mjs';
 
@@ -90,11 +90,12 @@ export function collectEntries(files) {
 
 /**
  * The calculator to use: the one this page was already allowed if there is
- * exactly one, else the browser's picker. A second picker in one click fails
- * like a cancel, so this prompts at most once.
+ * exactly one, else the browser's picker. A TI-84 Evo it was allowed does not
+ * count, so a CE plugged in beside one can still be picked. A second picker
+ * in one click fails like a cancel, so this prompts at most once.
  */
 export async function pickCalculator({ usb = globalThis.navigator?.usb } = {}) {
-  const granted = await CELink.granted({ usb });
+  const granted = (await CELink.granted({ usb })).filter(d => !isEvoDevice(d));
   if (granted.length === 1) return CELink.fromDevice(granted[0]);
   return CELink.request({ usb });
 }
@@ -369,22 +370,55 @@ export function jailbreakState(route, tools) {
 // the generous side, so a refusal means the send really would run out.
 const cost = (e, archived) => e.data.length + e.name.length + (archived ? 20 : 9);
 
+// The archive refuses a variable while it still lists free space: it behaves
+// as if a variable must fit inside one 64 KB flash sector's free run and one
+// sector is held back for garbage collection. Observed in an emulator running
+// OS 5.8.5: with 190 KB listed free a 40 KB variable fitted and a 45 KB one
+// was refused, a game whose files needed 88 KB was refused with 190 KB free,
+// and one whose files needed 354 KB (four of them 64 KB) was refused with
+// 490 KB free. So a send needs room for itself, for its two largest archived
+// variables once more, and one sector beyond that.
+export const ARCHIVE_MARGIN = 65536;
+
+/**
+ * The free RAM an assembly game needs to start: it is copied to RAM to run,
+ * even when archived, and many unpack themselves there too. `launchRam` maps
+ * a program's name to { size, ram }, a figure measured for the build of that
+ * program `size` bytes long; a program it does not cover, or a different
+ * build, gets the program's size plus 1 KB. Resolves { bytes, measured }, or
+ * null for a send with no assembly program.
+ */
+export function ramToStart(entries, launchRam = null) {
+  let best = null;
+  for (const e of entries.filter(isAssembly)) {
+    const m = launchRam?.[e.name];
+    const known = m && m.size === e.data.length && Number.isInteger(m.ram) && m.ram > 0;
+    const bytes = known ? m.ram : e.data.length + 1024;
+    if (!best || bytes > best.bytes) best = { bytes, measured: !!known };
+  }
+  return best;
+}
+
 /**
  * With no I/O: what to delete and send, and whether it fits. `rows` is the
  * calculator's listing; `archive` is 'file' (each variable where its file
- * says), 'programs' (every program archived, the rest where its file says)
- * or 'all' (every variable archived).
+ * says), 'programs' (every program archived, the rest where its file says),
+ * 'programs+appvars' (every program and AppVar archived, the rest where its
+ * file says) or 'all' (every variable archived). `launchRam` as ramToStart
+ * takes it.
  */
-export function planInstall(entries, { rows, ramFree = null, archiveFree = null, archive = 'file' }) {
+export function planInstall(entries, { rows, ramFree = null, archiveFree = null, archive = 'file', launchRam = null }) {
   const steps = entries.map(e => {
     const remove = rows.filter(r => clash(r, e));
-    const archived = archive === 'all' || (archive === 'programs' && PROGRAMS.includes(e.type)) || !!e.archived;
+    const archived = archive === 'all' || !!e.archived
+      || ((archive === 'programs' || archive === 'programs+appvars') && PROGRAMS.includes(e.type))
+      || (archive === 'programs+appvars' && e.type === TYPE.APPVAR);
     return { entry: e, archived, remove, reason: remove.length ? 'replace' : 'new' };
   });
   // RAM freed by a delete is back at once, but the delete runs only just
   // before its own file, so RAM is a running balance in send order. Freed
   // archive may not come back until a garbage collection, so it is not counted.
-  let ramNeed = 0, arcNeed = 0, ramBack = 0, balance = ramFree ?? 0, low = balance;
+  let ramNeed = 0, arcNeed = 0, arcLargest = 0, arcSecond = 0, ramBack = 0, balance = ramFree ?? 0, low = balance;
   for (const s of steps) {
     for (const r of s.remove) {
       if (r.archived || r.size == null) continue;
@@ -392,29 +426,37 @@ export function planInstall(entries, { rows, ramFree = null, archiveFree = null,
       ramBack += freed;
       balance += freed;
     }
-    if (s.archived) arcNeed += cost(s.entry, true);
-    else {
+    if (s.archived) {
+      const c = cost(s.entry, true);
+      arcNeed += c;
+      if (c > arcLargest) [arcLargest, arcSecond] = [c, arcLargest];
+      else arcSecond = Math.max(arcSecond, c);
+    } else {
       const c = cost(s.entry, false);
       ramNeed += c;
       balance -= c;
       low = Math.min(low, balance);
     }
   }
-  const space = { ramNeed, arcNeed, ramBack, ramFree, archiveFree, ramShort: ramFree == null ? 0 : Math.max(0, -low) };
-  // An assembly program is copied to RAM to run, even when it is archived.
+  const arcReserve = arcNeed ? arcLargest + arcSecond + ARCHIVE_MARGIN : 0;
+  const space = { ramNeed, arcNeed, arcReserve, ramBack, ramFree, archiveFree, ramShort: ramFree == null ? 0 : Math.max(0, -low) };
   const warnings = [];
-  const biggest = Math.max(0, ...entries.filter(isAssembly).map(e => e.data.length));
-  if (ramFree != null && biggest && balance < biggest + 1024) {
-    warnings.push({ code: 'LOW_RAM_TO_RUN', needKB: kb(biggest + 1024), freeKB: Math.max(0, Math.floor(balance / 1024)) });
+  const start = ramToStart(entries, launchRam);
+  if (ramFree != null && start && balance < start.bytes) {
+    warnings.push({
+      code: 'LOW_RAM_TO_RUN', needKB: kb(start.bytes), freeKB: Math.max(0, Math.floor(balance / 1024)),
+      shortKB: kb(start.bytes - balance), measured: start.measured,
+    });
   }
   return { steps, space, warnings };
 }
 
 /** Refuse a plan that does not fit, naming how much to free. */
 export function checkSpace({ space }) {
-  const { ramNeed, arcNeed, ramFree, archiveFree, ramShort } = space;
-  if (archiveFree != null && arcNeed > archiveFree) {
-    throw refusal('NO_ARCHIVE_SPACE', `Not enough room on the calculator: this game needs ${kb(arcNeed)} KB of archive and there's ${Math.floor(archiveFree / 1024)} KB free. Delete a few programs you don't need (2nd, +, 2: Mem Management), then try again.`, { needKB: kb(arcNeed - archiveFree) });
+  const { ramNeed, arcNeed, arcReserve = 0, ramFree, archiveFree, ramShort } = space;
+  const arcRoom = arcNeed + arcReserve;
+  if (archiveFree != null && arcRoom > archiveFree) {
+    throw refusal('NO_ARCHIVE_SPACE', `Not enough room on the calculator: this game needs ${kb(arcRoom)} KB of archive and there's ${Math.floor(archiveFree / 1024)} KB free. Delete a few programs you don't need (2nd, +, 2: Mem Management), then try again.`, { needKB: kb(arcRoom - archiveFree) });
   }
   if (ramShort > 0) {
     throw refusal('NO_RAM_SPACE', `Not enough RAM on the calculator: this game needs ${kb(ramNeed)} KB and there's ${Math.floor(ramFree / 1024)} KB free. Delete or archive a few programs you don't need (2nd, +, 2: Mem Management), then try again.`, { needKB: kb(ramShort) });
@@ -424,8 +466,11 @@ export function checkSpace({ space }) {
 // A single read of the free-memory parameters has come back wrong (0 bytes
 // free on a calculator with plenty, observed on hardware), so a refusal asks
 // the calculator once more. Returns the plan and whether it took a second read.
-async function planThatFits(link, todo, calc, archive) {
-  const plan = async ({ ramFree, archiveFree }) => planInstall(todo, { rows: await link.list(), ramFree, archiveFree, archive });
+async function planThatFits(link, todo, calc, archive, launchRam) {
+  const plan = async ({ ramFree, archiveFree }) => {
+    const rows = await link.list();
+    return { ...planInstall(todo, { rows, ramFree, archiveFree, archive, launchRam }), rows };
+  };
   const first = await plan(calc);
   try {
     checkSpace(first);
@@ -446,12 +491,17 @@ async function planThatFits(link, todo, calc, archive) {
  *   archive                  'file' stores each variable where its file says; 'programs' puts
  *                            every program in archive on an OS that starts archived programs
  *                            (5.3.0 and later) and stores everything else where its file says,
- *                            and below 5.3 is 'file'; 'all' archives all
+ *                            and below 5.3 is 'file'; 'programs+appvars' is 'programs' with
+ *                            every AppVar archived too, and below 5.3 is also 'file'; 'all'
+ *                            archives all
+ *   launchRam                measured free RAM to start, as ramToStart takes it
  * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked, verify }. A
  * failure part way carries `partial`, the names already on the calculator,
- * and `removed`, names deleted whose new copy never landed.
+ * and `removed`, names deleted whose new copy never landed. A variable the
+ * calculator refused for space may still be listed, empty, under its name;
+ * one this send created is deleted again and named in `emptied`.
  */
-export async function sendGame(openLink, files, { onProgress = null, onStep = null, verify = 'full', archive = 'file' } = {}) {
+export async function sendGame(openLink, files, { onProgress = null, onStep = null, verify = 'full', archive = 'file', launchRam = null } = {}) {
   const todo = collectEntries(files);
   const link = readyEach(openLink);
   const calc = await identify(link);
@@ -459,10 +509,10 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   if (asm && (calc.route === 'unsupported' || calc.route === 'unknown')) {
     throw refusal('NO_JAILBREAK', `There's no jailbreak for OS ${calc.os} yet, so this game can't run on it. Nothing was sent.`);
   }
-  const mode = archive === 'programs' && !launchesArchived(calc.os) ? 'file' : archive;
-  const { plan, rechecked } = await planThatFits(link, todo, calc, mode);
+  const mode = (archive === 'programs' || archive === 'programs+appvars') && !launchesArchived(calc.os) ? 'file' : archive;
+  const { plan, rechecked } = await planThatFits(link, todo, calc, mode, launchRam);
   const total = plan.steps.reduce((n, s) => n + s.entry.data.length, 0);
-  let before = 0;
+  let before = 0, sending = null;
   const sent = [], replaced = [], removed = new Set();
   try {
     for (const s of plan.steps) {
@@ -473,7 +523,9 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
         removed.add(r.name);
       }
       onStep?.('send', e.name);
+      sending = s;
       await link.send(e, { archive: s.archived, onProgress: onProgress ? done => onProgress(before + done, total) : undefined });
+      sending = null;
       before += e.data.length;
       removed.delete(e.name);
       sent.push(e.name);
@@ -490,6 +542,10 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   } catch (err) {
     err.partial = sent.slice();
     err.removed = [...removed];
+    if (sending && err?.code === 'CALC_ERROR') {
+      const gone = await dropEmpty(link, sending, plan.rows);
+      if (gone) err.emptied = [gone];
+    }
     throw err;
   }
   const archived = plan.steps.filter(s => s.archived).map(s => s.entry.name);
@@ -607,6 +663,27 @@ export function listedOnCalculator(games, file, rows) {
  */
 export function spaceGames({ games, rows, memory, sending }) {
   return gamesOnCalculator(games ?? [], rows, { memory }).filter(g => g.file !== sending);
+}
+
+// A send the calculator refused for space can leave an empty variable under
+// the name it was sending (seen for a program sent to archive: an empty
+// program in RAM, which runs and does nothing). After a refusal, a listed
+// variable of that name and type holding no more than its size word is
+// deleted, but only one this send made: absent from the listing taken before
+// the send, or listed then and deleted by this send. Resolves the name
+// deleted, or null. Never throws: the refusal is what the page reports.
+async function dropEmpty(link, step, rowsBefore = []) {
+  const e = step.entry;
+  const was = rowsBefore.filter(r => r.name === e.name && r.type === e.type);
+  if (was.some(r => !step.remove.includes(r))) return null;
+  try {
+    const row = (await link.list()).find(r => r.name === e.name && r.type === e.type);
+    if (!row || row.archived || row.size == null || row.size > 2) return null;
+    await link.delete(row.name, row.type);
+    return row.name;
+  } catch {
+    return null;
+  }
 }
 
 async function readBack(link, e) {

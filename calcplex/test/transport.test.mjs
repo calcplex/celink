@@ -77,12 +77,12 @@ function picker(sim) {
   return { asked, requestDevice: async options => { asked.push(options); granted = [sim]; return sim; }, getDevices: async () => granted };
 }
 
-test('connect picks a TI device, opens it and routes off its OS', async () => {
+test('connect picks a TI device, opens it, routes off its OS and keeps the free memory it read', async () => {
   const sim = new SimulatedCalculator({ os: OS.v3 });
   const usb = picker(sim);
   await withUsb(usb, async () => {
     const t = new CETransport();
-    assert.deepEqual(await t.connect(), { model: 'TI-84 Plus CE', os: '5.8.5.0074', route: 'v3', home: true });
+    assert.deepEqual(await t.connect(), { model: 'TI-84 Plus CE', os: '5.8.5.0074', route: 'v3', home: true, ramFree: 154000, archiveFree: 2372475 });
     assert.equal(t.device, sim);
     assert.deepEqual(usb.asked[0].filters, [{ vendorId: 0x0451 }]);
   });

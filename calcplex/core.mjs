@@ -5,7 +5,7 @@
 // What the CalcPlex pages share: the install route for each CE OS version,
 // the pinned arTIfiCE release files, the strict file checks that stand in
 // front of the cable, the error wording and the analytics vocabulary.
-import { CALC_ERRORS, LINK_LOST } from '../celink.mjs';
+import { CALC_ERRORS, LINK_LOST, EVO_PRODUCT_ID } from '../celink.mjs';
 import { APP_MAGIC, TYPE, checksum } from '../tifiles.mjs';
 
 /** An Error with a stable `code` for analytics; its message is written for the student. */
@@ -592,10 +592,122 @@ export function track(event, params) {
   } catch { /* analytics never breaks the page */ }
 }
 
-/** ce_connect_fail, with where the connect died when the error says. */
+// Connect failures this page load has reported so far.
+let connectFails = 0;
+
+/**
+ * ce_connect_fail, with where the connect died when the error says, and
+ * `retried`: how many failed connects this page load reported before this
+ * one (0 for the first; 9 stands for 9 or more).
+ */
 export function trackConnectFail(err, extra = {}) {
   const detail = openDetail(err);
-  track('ce_connect_fail', { reason: failReason(err), ...(detail && { open_detail: detail }), ...refusedAt(err), ...extra });
+  const retried = Math.min(connectFails++, 9);
+  track('ce_connect_fail', { reason: failReason(err), ...(detail && { open_detail: detail }), ...refusedAt(err), retried, ...extra });
+}
+
+// What a Connect click says when another tab of the site is sending or
+// deleting (tabHandoff below).
+export const TAB_BUSY_TEXT = 'Your calculator is busy in another tab. Wait for it to finish there, then try again.';
+
+/**
+ * The calculator shared between this site's tabs. Only one tab can hold it,
+ * so before a Connect click opens it, `claim()` asks the other tabs to let it
+ * go, over a BroadcastChannel (which only reaches pages of the same origin).
+ * A tab that is mid-job answers busy and keeps it; any other tab parks (no
+ * connecting on its own until its own Connect click), and the one holding it
+ * closes it and says so. The page says what it is through:
+ *   holding()    it has the calculator open
+ *   busy()       it is sending, deleting or otherwise mid-job
+ *   release()    close the link (a promise); called only when holding
+ *   park(who)    another tab, a 'page' or the 'installer', is taking it
+ * held(on) tells the other tabs this one opened it or let it go; the page
+ * calls it whenever that may have changed (it only sends on a change).
+ * claim() resolves 'busy' when the holder is mid-job, else 'free', after the
+ * holder's answer or `wait` ms, and at once when no other tab holds it (in
+ * the first `settle` ms after load, once those had their moment).
+ * othersHold() says whether another tab holds it, once the tabs that were
+ * open at load had a moment to answer. Without BroadcastChannel every tab
+ * acts alone, as before: claim() is 'free' and othersHold() false.
+ */
+export function tabHandoff({ who = 'page', holding, busy, release, park = () => {}, name = 'ce-usb', wait = 500, settle = 100, Channel = globalThis.BroadcastChannel } = {}) {
+  let ch = null;
+  try { if (typeof Channel === 'function') ch = new Channel(name); } catch { ch = null; }
+  if (!ch) {
+    return { claim: async () => 'free', held() {}, othersHold: async () => false, close() {} };
+  }
+  const id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const others = new Set(); // tabs that said they hold it
+  const pending = new Map(); // claim id -> { waitFor, finish }
+  let mine = false, seq = 0;
+  const post = m => { try { ch.postMessage({ ...m, from: id }); } catch { /* channel closed */ } };
+  const answered = (req, from, value) => {
+    const p = pending.get(req);
+    if (!p) return;
+    if (value === 'busy') p.finish('busy');
+    else {
+      p.waitFor.delete(from);
+      if (!p.waitFor.size) p.finish('free');
+    }
+  };
+  ch.onmessage = async ({ data: m }) => {
+    if (!m || m.from === id) return;
+    switch (m.t) {
+      case 'who': if (mine) post({ t: 'hold' }); break;
+      case 'hold': others.add(m.from); break;
+      case 'free': others.delete(m.from); break;
+      case 'released': others.delete(m.from); if (m.to === id) answered(m.req, m.from, 'free'); break;
+      case 'busy': if (m.to === id) answered(m.req, m.from, 'busy'); break;
+      case 'release': {
+        const has = holding();
+        if (busy()) {
+          if (has || mine) post({ t: 'busy', to: m.from, req: m.req });
+          return;
+        }
+        park(m.who === 'installer' ? 'installer' : 'page');
+        if (has) await Promise.resolve(release()).catch(() => {});
+        if (has || mine) {
+          mine = false;
+          post({ t: 'released', to: m.from, req: m.req });
+        }
+        break;
+      }
+      default: break;
+    }
+  };
+  post({ t: 'who' });
+  const settled = new Promise(resolve => setTimeout(resolve, settle));
+  return {
+    async claim() {
+      const req = `${id}:${++seq}`;
+      post({ t: 'release', who, req });
+      await settled;
+      const waitFor = new Set(others);
+      if (!waitFor.size) return 'free';
+      return new Promise(resolve => {
+        const finish = value => {
+          clearTimeout(timer);
+          pending.delete(req);
+          resolve(value);
+        };
+        const timer = setTimeout(() => finish('free'), wait);
+        pending.set(req, { waitFor, finish });
+      });
+    },
+    held(on) {
+      if (!!on === mine) return;
+      mine = !!on;
+      post({ t: mine ? 'hold' : 'free' });
+    },
+    async othersHold() {
+      await settled;
+      return others.size > 0;
+    },
+    close() {
+      for (const p of pending.values()) p.finish('free');
+      try { ch.close(); } catch { /* already closed */ }
+    },
+  };
 }
 
 /**
@@ -611,20 +723,35 @@ export function refusedAt(err) {
 }
 
 // The site's analytics name the OS and model parameters evo_os and evo_hw on
-// every calculator's pages. `home` is 1 when the calculator was on its home
-// screen at connect.
-export function calcParams({ os, model, home }) {
-  return { evo_os: os, evo_hw: model, ...(home === undefined ? {} : { home: home ? 1 : 0 }) };
+// every calculator's pages, and free memory evo_ram_free and evo_arch_free.
+// `home` is 1 when the calculator was on its home screen at connect. Free
+// RAM and archive go in whole KB, rounded down, and only when read.
+const freeKB = bytes => (Number.isFinite(bytes) && bytes >= 0 ? Math.floor(bytes / 1024) : undefined);
+export function calcParams({ os, model, home, ramFree, archiveFree }) {
+  const ram = freeKB(ramFree), arch = freeKB(archiveFree);
+  return {
+    evo_os: os, evo_hw: model, ...(home === undefined ? {} : { home: home ? 1 : 0 }),
+    ...(ram === undefined ? {} : { evo_ram_free: ram }), ...(arch === undefined ? {} : { evo_arch_free: arch }),
+  };
 }
 
 /**
- * sendGame's `archive` mode for a page. Every page (hub, game pages, the
- * installer, the math page) puts programs in archive where the OS starts
- * archived programs, and below that keeps each file's own flag. `page` stays
- * an argument so a page can differ again.
+ * Games, by main program name, whose AppVars all go to archive on an OS that
+ * starts archived programs, whatever each file's own flag says. Geometry Dash
+ * (AGD) reads its levels in place and keeps them in archive itself.
  */
-export function archiveMode(page) {
-  return 'programs';
+export const ARCHIVE_ALL_APPVARS = ['AGD'];
+
+/**
+ * sendGame's `archive` mode for a page and the game's main program `main`.
+ * Every page (hub, game pages, the installer, the math page) puts programs in
+ * archive where the OS starts archived programs, and below that keeps each
+ * file's own flag. A game in ARCHIVE_ALL_APPVARS gets 'programs+appvars': its
+ * AppVars go to archive too, on the same OSes. `page` stays an argument so a
+ * page can differ again.
+ */
+export function archiveMode(page, main = null) {
+  return ARCHIVE_ALL_APPVARS.includes(main) ? 'programs+appvars' : 'programs';
 }
 
 /** ce_jb_prompt's `choice`: either button by its name, and any other close (Escape, a click outside) as cancel. */
@@ -975,6 +1102,7 @@ const PAGE_REASONS = new Map([
   ['COLLISION', 'collision'],
   ['WRONG_ROUTE', 'wrong_route'],
   ['WRONG_MODEL', 'wrong_model'],
+  ['TAB_BUSY', 'tab_busy'],
 ]);
 
 /** The `reason` an analytics event gives any error. */
@@ -1031,11 +1159,41 @@ export function installerFailReason(err) {
   return failReason(err);
 }
 
+/** True for a TI-84 Evo, which shares TI's vendor id but takes no CE files. */
+export function isEvoDevice(device) {
+  return device?.productId === EVO_PRODUCT_ID;
+}
+
+// Where a CE download page sends a TI-84 Evo picked in the device list, when
+// the page's script tag names no address of its own.
+export const EVO_PAGES = Object.freeze({ games: '/downloads/ti84evo/games/', math: '/downloads/ti84evo/math/' });
+
+/** The Evo address for `page` (hub, game or math): `setting`, or the default. */
+export function evoAddress(page, setting) {
+  return setting || (page === 'math' ? EVO_PAGES.math : EVO_PAGES.games);
+}
+
+/** What a CE download page says when the picked device is a TI-84 Evo, as text. */
+export function evoText(page) {
+  return `That's a TI-84 Evo. These ${page === 'math' ? 'programs' : 'games'} only run on the TI-84 Plus CE.`;
+}
+
+/**
+ * evoText with a link to `href`, as HTML. An address on another site opens
+ * in a new tab.
+ */
+export function evoHtml(page, href) {
+  const target = /^https?:\/\//.test(href) ? ' target="_blank" rel="noopener"' : '';
+  const words = page === 'math' ? 'Programs for your Evo are here.' : 'Games for your Evo are here.';
+  return `${esc(evoText(page))} <a href="${esc(href)}"${target}>${words}</a>`;
+}
+
 /** The `reason` for an error from the cable or a file, or undefined. */
 export function linkReason(err) {
   const code = err?.code;
   if (code === 'NO_DEVICE_SELECTED' || err?.name === 'NotFoundError') return 'no_device';
   if (code === 'NO_WEBUSB' || code === 'OTHER_MODEL') return 'unsupported';
+  if (code === 'TI84_EVO') return 'evo';
   if (code === 'OPEN_FAILED') return 'open_failed';
   if (code === 'TIMEOUT') return 'timeout';
   if (code === 'CALC_ERROR') return CALC_BUSY.includes(err.calcError) ? 'calc_busy' : `calc_error_${err.calcError}`;

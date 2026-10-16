@@ -35,20 +35,23 @@ export class CETransport {
   }
 
   /**
-   * Pick, open and identify the calculator: { model, os, route }. The picker
+   * Pick, open and identify the calculator: { model, os, route, home,
+   * ramFree, archiveFree } (free memory in bytes, as read). The picker
    * opens every time, before anything else is awaited, so it keeps the
-   * click's activation.
+   * click's activation. `beforeOpen`, when given, runs after the picker and
+   * before the calculator is opened; a throw from it ends the connect there.
    */
-  async connect() {
+  async connect({ beforeOpen } = {}) {
     if (!navigator.usb) throw refusal('NO_WEBUSB', 'Use Chrome or Edge on a computer for direct USB. The manual guide works in other browsers.');
     this.link = await CELink.request({ appTimeout: APP_TIMEOUT_MS });
     this.device = this.link.device;
     if ((await CELink.granted()).length !== 1) throw refusal('SEVERAL_CALCULATORS', 'Connect only one TI calculator, then reload and try again.');
+    if (beforeOpen) await beforeOpen();
     const calc = await this.#guard(async () => {
       await this.link.open();
       return readyEach(this.link).info();
     });
-    this.info = { ...checkCalculator(calc.productName, calc.osVersion), home: calc.atHomescreen };
+    this.info = { ...checkCalculator(calc.productName, calc.osVersion), home: calc.atHomescreen, ramFree: calc.ramFree, archiveFree: calc.archiveFree };
     return this.info;
   }
 
