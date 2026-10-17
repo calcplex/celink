@@ -26,7 +26,7 @@
 // words painted first here, so nothing pops in when this loads; where
 // this would not mount, <html> is ce-nosend and the panel shows a one-line note.
 import {
-  PROGRAMS, sendGame, collectEntries, deleteGame, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
+  PROGRAMS, sendGame, collectEntries, deleteGame, freeRamAgain, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
   unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete,
 } from './gamesend.mjs';
 import {
@@ -382,7 +382,9 @@ async function announceContents({ fresh = true } = {}) {
   if (fresh) {
     let free = { ramFree: null, archiveFree: null }; // a refused read: not known now
     try {
-      const i = await readyEach(link).info();
+      // Free RAM read as 0 is read once more; a second 0 is not known.
+      const l = readyEach(link);
+      const i = await freeRamAgain(l, await l.info());
       free = { ramFree: i.ramFree, archiveFree: i.archiveFree };
     } catch (err) {
       if (linkDead(err)) {

@@ -4,7 +4,7 @@
 // The jailbreak installer's side of celink: one calculator, the collision
 // rules, and a read-back after every send.
 import { NAMED, checkCalculator, digest, linkDead, officialFiles, parseFlashApp, parseVariable, refusal, sameVariable } from './core.mjs';
-import { readyEach } from './gamesend.mjs';
+import { freeRamAgain, readyEach } from './gamesend.mjs';
 import { CELink } from '../celink.mjs';
 import { buildFile, parseAppFile, parseFile } from '../tifiles.mjs';
 
@@ -36,7 +36,9 @@ export class CETransport {
 
   /**
    * Pick, open and identify the calculator: { model, os, route, home,
-   * ramFree, archiveFree } (free memory in bytes, as read). The picker
+   * ramFree, archiveFree } (free memory in bytes, as read; ramFree is
+   * undefined when it read 0 twice, with `reread: true` when it took a
+   * second read, as gamesend.freeRamAgain). The picker
    * opens every time, before anything else is awaited, so it keeps the
    * click's activation. `beforeOpen`, when given, runs after the picker and
    * before the calculator is opened; a throw from it ends the connect there.
@@ -49,9 +51,17 @@ export class CETransport {
     if (beforeOpen) await beforeOpen();
     const calc = await this.#guard(async () => {
       await this.link.open();
-      return readyEach(this.link).info();
+      const link = readyEach(this.link);
+      const first = await link.info();
+      if (first.ramFree !== 0) return first;
+      // Free RAM read as 0: read again after a listing, a second 0 is unknown.
+      await link.list();
+      return freeRamAgain(link, first);
     });
-    this.info = { ...checkCalculator(calc.productName, calc.osVersion), home: calc.atHomescreen, ramFree: calc.ramFree, archiveFree: calc.archiveFree };
+    this.info = {
+      ...checkCalculator(calc.productName, calc.osVersion), home: calc.atHomescreen, ramFree: calc.ramFree, archiveFree: calc.archiveFree,
+      ...(calc.reread ? { reread: true } : {}),
+    };
     return this.info;
   }
 

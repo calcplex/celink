@@ -134,6 +134,26 @@ export async function identify(link) {
   };
 }
 
+/**
+ * Free RAM (parameter 0x000E) has read 0 on calculators with plenty
+ * (observed on hardware, often the first read after a CE was plugged in or
+ * turned on), where a later read had the real figure. So a 0 is read once more, after a listing (the
+ * re-read that has come back right); a second 0 leaves ramFree out, as a
+ * refused read does: unknown, never 0. A calculator that really is full
+ * still refuses a send itself (out of memory, 0x000C). `info` is info()'s or
+ * identify()'s answer; anything else is a reading that is not 0, returned as
+ * it is. A re-read answer carries `reread: true`, and its archive figure.
+ */
+export async function freeRamAgain(link, info) {
+  if (info.ramFree !== 0) return info;
+  const again = await link.info();
+  const { ramFree, ...rest } = info;
+  return {
+    ...rest, ...(again.ramFree ? { ramFree: again.ramFree } : {}),
+    ...(again.archiveFree === undefined ? {} : { archiveFree: again.archiveFree }), reread: true,
+  };
+}
+
 // What on a calculator means assembly games can run, on which routes, and
 // how a game then starts: 'A' (prgm, run A, pick the game), 'prgm' (the prgm
 // menu, once the app has been opened since the last RAM reset: the app
@@ -149,6 +169,9 @@ export const JAILBREAKS = [
   { tool: 'AsmHook2', name: 'AsmHook2', types: [TYPE.FLASH_APP], routes: ['v21', 'v3'], start: 'prgm' },
   { tool: 'Cesium', name: 'Cesium', types: [TYPE.FLASH_APP], routes: ['v21', 'v3'], start: 'shell' },
   { tool: 'CEaShell', name: 'CEaShell', types: [TYPE.FLASH_APP], routes: ['v21', 'v3'], start: 'shell' },
+  // The CalcPlex app, a shell that starts games from inside itself. `label` is
+  // how the page names it: "from CalcPlex" would read as the website.
+  { tool: 'CalcPlex', name: 'CalcPlex', label: 'the CalcPlex app', types: [TYPE.FLASH_APP], routes: ['v21', 'v3'], start: 'shell' },
   // arTIfiCE_v2.1.8xp. The OS patched v2.x in 5.8.5.
   { tool: 'arTIfiCE v2.1', name: 'A', types: PROGRAMS, routes: ['v21'], start: 'A', size: 904, sha256: 'a3d6b61efdc4352b945e78d67278a1975854d4f81070c8235e0abfcf21fcfd12' },
 ];
@@ -308,12 +331,14 @@ export function ownedAfterDelete(owned, r) {
  * a program runs. Anything else it matched by size is dropped. Any other
  * error during a read means the link is gone, and is thrown. With `own`
  * (known versions, as above), `owned` is ownedRows' answer, one read per
- * size match; without it nothing more is read and `owned` is [].
+ * size match; without it nothing more is read and `owned` is []. Free RAM
+ * read as 0 is read again after the listing (freeRamAgain).
  */
 export async function inspect(openLink, { own = [] } = {}) {
   const link = readyEach(openLink);
-  const calc = await identify(link);
+  const first = await identify(link);
   const rows = await link.list();
+  const calc = await freeRamAgain(link, first);
   const tools = [];
   for (const j of JAILBREAKS) {
     const row = rows.find(r => matches(j, r));
@@ -340,12 +365,14 @@ export async function inspect(openLink, { own = [] } = {}) {
 
 /**
  * The shell apps on the calculator that work on this route, by name, for the
- * page to say which one starts games: 'Cesium', 'CEaShell', or both joined
- * with "or". '' when none (the page then says nothing about a shell).
+ * page to say which one starts games: 'Cesium', 'CEaShell', 'the CalcPlex
+ * app' (a row's `label` when it has one), two joined with "or", three as
+ * "A, B or C". '' when none (the page then says nothing about a shell).
  */
 export function shellLabel(route, tools) {
-  return JAILBREAKS.filter(j => j.start === 'shell' && tools.includes(j.tool) && j.routes.includes(route))
-    .map(j => j.name).join(' or ');
+  const names = JAILBREAKS.filter(j => j.start === 'shell' && tools.includes(j.tool) && j.routes.includes(route))
+    .map(j => j.label ?? j.name);
+  return names.length > 2 ? `${names.slice(0, -1).join(', ')} or ${names.at(-1)}` : names.join(' or ');
 }
 
 /**
@@ -464,21 +491,30 @@ export function checkSpace({ space }) {
 }
 
 // A single read of the free-memory parameters has come back wrong (0 bytes
-// free on a calculator with plenty, observed on hardware), so a refusal asks
-// the calculator once more. Returns the plan and whether it took a second read.
+// free on a calculator with plenty, observed on hardware), so free RAM read
+// as 0 is read again after the listing before any planning (freeRamAgain:
+// a second 0 is unknown, so no RAM refusal and no LOW_RAM_TO_RUN from it),
+// and a refusal from a first read asks the calculator once more, a 0 then
+// also unknown. Returns the plan and whether it took a second read.
 async function planThatFits(link, todo, calc, archive, launchRam) {
-  const plan = async ({ ramFree, archiveFree }) => {
-    const rows = await link.list();
+  const plan = async ({ ramFree, archiveFree }, listed = null) => {
+    const rows = listed ?? await link.list();
     return { ...planInstall(todo, { rows, ramFree, archiveFree, archive, launchRam }), rows };
   };
-  const first = await plan(calc);
+  let free = calc, rows = null;
+  if (calc.ramFree === 0) {
+    rows = await link.list();
+    free = await freeRamAgain(link, calc);
+  }
+  const first = await plan(free, rows);
   try {
     checkSpace(first);
-    return { plan: first, rechecked: false };
+    return { plan: first, rechecked: !!free.reread };
   } catch (err) {
-    if (err.code !== 'NO_RAM_SPACE' && err.code !== 'NO_ARCHIVE_SPACE') throw err;
+    if (free.reread || (err.code !== 'NO_RAM_SPACE' && err.code !== 'NO_ARCHIVE_SPACE')) throw err;
   }
-  const second = await plan(await link.info());
+  const again = await link.info();
+  const second = await plan(again.ramFree === 0 ? { ...again, ramFree: undefined } : again);
   checkSpace(second);
   return { plan: second, rechecked: true };
 }

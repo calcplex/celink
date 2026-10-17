@@ -554,6 +554,25 @@ export function isChromeOS(nav) {
   return hint ? hint === 'Chrome OS' || hint === 'Chromium OS' : /\bCrOS\b/.test(nav.userAgent);
 }
 
+// The help chat's <platform>: one coarse word, never the userAgent itself.
+const PLATFORM_HINTS = { macOS: 'mac', Linux: 'linux', Android: 'android', iOS: 'ios' };
+
+/** windows, mac, chromeos, linux, android or ios as the browser reports it; '' when it doesn't say. */
+export function platformName(nav) {
+  if (!nav) return '';
+  if (isWindows(nav)) return 'windows';
+  if (isChromeOS(nav)) return 'chromeos';
+  const hint = platformHint(nav);
+  if (hint) return PLATFORM_HINTS[hint] || '';
+  const ua = String(nav.userAgent || '');
+  if (/Android/i.test(ua)) return 'android';
+  if (/iPhone|iPad|iPod/.test(ua)) return 'ios';
+  // An iPad asks for the desktop site as a Mac; it has a touch screen.
+  if (/Macintosh|Mac OS X/.test(ua)) return nav.maxTouchPoints > 1 ? 'ios' : 'mac';
+  if (/Linux|X11/.test(ua)) return 'linux';
+  return '';
+}
+
 // Every analytics parameter below is a fixed vocabulary, never the browser's
 // or the library's text: GA4 folds a high-cardinality value into "(other)".
 // Beyond the reasons and calcParams:
@@ -725,13 +744,16 @@ export function refusedAt(err) {
 // The site's analytics name the OS and model parameters evo_os and evo_hw on
 // every calculator's pages, and free memory evo_ram_free and evo_arch_free.
 // `home` is 1 when the calculator was on its home screen at connect. Free
-// RAM and archive go in whole KB, rounded down, and only when read.
+// RAM and archive go in whole KB, rounded down, and only when read. `retried`
+// is 1 when free RAM first read 0 and was read again (gamesend.freeRamAgain);
+// a second 0 is unknown and sends no evo_ram_free.
 const freeKB = bytes => (Number.isFinite(bytes) && bytes >= 0 ? Math.floor(bytes / 1024) : undefined);
-export function calcParams({ os, model, home, ramFree, archiveFree }) {
+export function calcParams({ os, model, home, ramFree, archiveFree, reread }) {
   const ram = freeKB(ramFree), arch = freeKB(archiveFree);
   return {
     evo_os: os, evo_hw: model, ...(home === undefined ? {} : { home: home ? 1 : 0 }),
     ...(ram === undefined ? {} : { evo_ram_free: ram }), ...(arch === undefined ? {} : { evo_arch_free: arch }),
+    ...(reread ? { retried: 1 } : {}),
   };
 }
 
