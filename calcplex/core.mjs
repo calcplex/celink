@@ -582,7 +582,8 @@ export function platformName(nav) {
 //                open of the math page's "Can't find it?" (FIND_HELP_OPEN; it has no choices);
 //                open and not_listed are always a games page's;
 //                ce_delete_reason, the reason picked after a delete (DELETE_REASONS);
-//                ce_rate, the stars given: '1' to '5', or a change as '4to2' (rateParams)
+//                ce_rate, the stars given: '1' to '5', or a change as '4to2' (rateParams);
+//                a vote within a day of this browser's fresh send adds '@Nm' (sentTag)
 //   jb           ce_calc_info, jailbreakState at connect: none | found | shell | missing | blocked;
 //                ce_start_report: found | shell | none, and none at all with find_open
 //   connected    ce_download, a calculator connected at the click: 1 | 0
@@ -875,11 +876,13 @@ export function deleteReasonReporter({ game, page, lastReason }, send = track) {
   };
 }
 
-// Stars for a game or math program the calculator already had when the page
-// connected: "Played it? Rate it:" ("Used it?" on the math page) and five
-// stars on its card, never on one this page just sent, which nobody has
-// played yet. One vote per game per browser, kept in localStorage and open to
-// change; it goes out as ce_rate.
+// Stars for a game or math program on the connected calculator: "Played it?
+// Rate it:" ("Used it?" on the math page) and five stars on its card. One vote
+// per game per browser, kept in localStorage and open to change; it goes out
+// as ce_rate. A card this browser just sent shows them too, so the student
+// learns stars exist before leaving; such a vote carries the minutes since
+// that send ('5@3m', sentTag), so a vote on the download can be told from
+// one on the game.
 export const RATE_STARS = 5;
 export const RATE_STORE = 'calcplex-rated';
 // A low score asks what to change, in the feedback box.
@@ -892,11 +895,49 @@ const wholeStars = n => Number.isInteger(n) && n >= 1 && n <= RATE_STARS;
  * 1 to 5. `from`, the vote it replaces, makes the choice a change ('4to2'),
  * which counts as one vote moved from 4 to 2; the same stars again is null.
  */
-export function rateParams({ game, page, stars, from = 0 }) {
+export function rateParams({ game, page, stars, from = 0, since = null }) {
   if (!wholeStars(stars) || !game) return null;
-  if (!from) return { game, page, choice: String(stars) };
+  const tag = sentTag(since);
+  if (!from) return { game, page, choice: String(stars) + tag };
   if (!wholeStars(from) || from === stars) return null;
-  return { game, page, choice: `${from}to${stars}` };
+  return { game, page, choice: `${from}to${stars}${tag}` };
+}
+
+// When this browser last sent each program fresh (it was not on the
+// calculator before), as { 'ce:/downloads/ce/Snake.8xp': ms, 'evo:SNAKE': ms }.
+// A vote within SENT_WINDOW_MIN of that send is tagged with the minutes since,
+// floored to SENT_BUCKETS so `choice` keeps few values (GA4 folds a
+// many-valued dimension into "(other)"); later votes, and votes on a game the
+// calculator already had, go out untagged as before.
+export const SENT_STORE = 'calcplex-sent';
+export const SENT_WINDOW_MIN = 24 * 60;
+export const SENT_BUCKETS = [0, 1, 2, 3, 5, 10, 20, 30, 60];
+
+/** '@5m' for 5 to 9 minutes after the send, '@60m' for an hour or more; '' for no recent send. */
+export function sentTag(since) {
+  if (typeof since !== 'number' || !Number.isFinite(since) || since < 0 || since >= SENT_WINDOW_MIN) return '';
+  return `@${SENT_BUCKETS.filter(b => b <= since).at(-1)}m`;
+}
+
+/** Note a fresh send of `key`. False when the browser would not store it. */
+export function rememberSend(key, now = Date.now(), store = globalThis.localStorage) {
+  try {
+    const all = readRatings(store, SENT_STORE);
+    // Drop sends past the window so the map stays small.
+    for (const k of Object.keys(all)) if (!(now - all[k] < SENT_WINDOW_MIN * 60000)) delete all[k];
+    store.setItem(SENT_STORE, JSON.stringify({ ...all, [key]: now }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whole minutes since this browser's fresh send of `key`, or null (none, or past the window). */
+export function sentAgo(key, now = Date.now(), store = globalThis.localStorage) {
+  const t = readRatings(store, SENT_STORE)[key];
+  if (typeof t !== 'number' || !Number.isFinite(t)) return null;
+  const min = Math.floor((now - t) / 60000);
+  return min >= 0 && min < SENT_WINDOW_MIN ? min : null;
 }
 
 // The browser's votes as { 'ce:SNAKE': 4, ... }. Storage that is missing,

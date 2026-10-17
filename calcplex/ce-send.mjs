@@ -16,9 +16,9 @@
 // archived on 5.3 and later, it ends with "Can't find it?". Wherever a sentence names the prgm
 // key, the key carries a "?" that shows it on the keypad. Wherever words
 // ask for the game to be sent again, a Send again button sits beside them.
-// A game or program the calculator already had when the page connected (not
-// one this page just sent) gets "Played it? Rate it:" ("Used it?" on the math
-// page) and five stars under its card.
+// A game or program on the connected calculator, including one this page just
+// sent, gets "Played it? Rate it:" ("Used it?" on the math page) and five
+// stars under its card.
 // Without WebUSB, or on a phone, the page keeps its download buttons only.
 // Another script on the page (a help panel, say) can follow what is on the
 // connected calculator: see announceContents below.
@@ -33,7 +33,7 @@ import {
   DELETE_REASONS, FEEDBACK_FORM, FEEDBACK_MAX, FIND_HELP_OPEN, PREVIEW_HOST, RATE_ASK_AT, RATE_STARS, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
   jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
   sendFeedback, startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
-  rateParams, ratedNote, ratedStars, rememberRating, rememberRatingNote, evoAddress, evoHtml, evoText, isEvoDevice,
+  rateParams, ratedNote, ratedStars, rememberRating, rememberRatingNote, rememberSend, sentAgo, evoAddress, evoHtml, evoText, isEvoDevice,
   openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, sendOutcome,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
@@ -630,8 +630,8 @@ async function run({ file, label, say, show }) {
     }
     // `retried: 1`: the space check passed only on a second read of the calculator.
     track('ce_send_success', { game, outcome: sendOutcome(r), route: r.route, page, ...(r.rechecked ? { retried: 1 } : {}) });
-    // Nobody has played a game that just arrived, so its card asks for no stars.
-    if (!r.replaced.length) freshSent.add(file);
+    // A game that just arrived gets stars too; a vote on it carries the minutes since this send.
+    if (!r.replaced.length) rememberSend('ce:' + file);
     // A math program read back whole as a version the site served is ours, so its card turns to Delete.
     if (page === 'math' && deleteOn() && byContent()) {
       const owned = await ownedAfterSend(calc?.owned, r, entries, await ownNow());
@@ -1016,13 +1016,14 @@ async function removeGame({ file, label, say, show, space = null }) {
   }
 }
 
-// Stars: "Played it? Rate it:" under the card of a game the
-// calculator already had, never one this page sent fresh (`freshSent`, by
-// file). One vote per game per browser, by file, which can be changed; a
-// vote goes out as ce_rate with the game's program name ('4'), a change as
-// '4to2', and three stars or fewer open the feedback box. The math page too, as "Used it?".
+// Stars: "Played it? Rate it:" under the card of a game on the
+// calculator, including one this page just sent (so the student sees stars
+// exist before leaving). One vote per game per browser,
+// by file, which can be changed; a vote goes out as ce_rate with the game's
+// program name ('4'), a change as '4to2', either with '@Nm' when it comes
+// within a day of this browser's fresh send (rememberSend), and three stars
+// or fewer open the feedback box. The math page too, as "Used it?".
 // ?rate=1 on localhost shows the first card's stars without a calculator.
-const freshSent = new Set();
 const DEMO_RATE = PREVIEW_HOST && /[?&]rate=1\b/.test(location.search);
 const STAR = '<svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.6l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.5l-5.9 3.1 1.2-6.5-4.8-4.6 6.6-.9z" fill="currentColor"/></svg>';
 
@@ -1075,7 +1076,8 @@ function mountRate(after, { file, label, demo = false }) {
     rememberRating(key, n);
     fill();
     done.textContent = from ? 'Updated. Thanks for rating it!' : 'Thanks for rating it!';
-    const note = `rated ${n} of ${RATE_STARS}` + (from ? `, was ${from}` : '');
+    const since = sentAgo(key);
+    const note = `rated ${n} of ${RATE_STARS}` + (from ? `, was ${from}` : '') + (since === null ? '' : `, ${since} min after sending`);
     const fb = row.querySelector('.ce-fb');
     if (fb?.querySelector('textarea')) fb.dataset.note = note;
     else if (n <= RATE_ASK_AT) {
@@ -1083,12 +1085,12 @@ function mountRate(after, { file, label, demo = false }) {
       const { os = '', route = '' } = calc || {};
       row.insertAdjacentHTML('beforeend', feedbackHtml(label, { ask: 'What could be improved?', os, route, note, choice: 'rated', closable: true, rateKey: key, text: ratedNote(key) }));
     }
-    const params = rateParams({ game: await gameName(file, label).catch(() => label.slice(0, 20)), page, stars: n, from });
+    const params = rateParams({ game: await gameName(file, label).catch(() => label.slice(0, 20)), page, stars: n, from, since });
     if (params) track('ce_rate', params);
   });
   return onCalc => {
     if (!votedHere) { mine = ratedStars(key); fill(); }
-    row.hidden = !(votedHere || ((onCalc || demo) && !freshSent.has(file)));
+    row.hidden = !(votedHere || onCalc || demo);
   };
 }
 
