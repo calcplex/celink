@@ -34,7 +34,7 @@ import {
   jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
   sendFeedback, startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
   rateParams, ratedNote, ratedStars, rememberRating, rememberRatingNote, evoAddress, evoHtml, evoText, isEvoDevice,
-  openDetail, tabHandoff, TAB_BUSY_TEXT,
+  openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, sendOutcome,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
@@ -56,7 +56,9 @@ import { CELink } from '../celink.mjs';
 // data-ce-swap-download="off" (no download link under it; a student who wants
 // the file unplugs, or the download-first gate links it). data-ce-progress=
 // "bar" adds a bar under a card's Sending… line. data-ce-ram is the address of
-// the measured free RAM each game needs to start (gamesend's ramToStart).
+// the measured free RAM each game needs to start (gamesend's ramToStart), and
+// data-ce-parts the address of the games whose optional parts a send can
+// leave out when the archive is short (core's partsOf, gamesend's sendGame).
 const SETUP = document.querySelector('script[src*="/ce-send.mjs"]')?.dataset ?? {};
 const INSTALLER = SETUP.ceInstaller || '/ti84plusce-jailbreak-installer/';
 const INSTALLER_TARGET = /^https?:\/\//.test(INSTALLER) ? ' target="_blank" rel="noopener"' : '';
@@ -197,6 +199,22 @@ function loadRam() {
   return ramList;
 }
 
+// The games with optional parts, { NAME: { base, parts } }, read once per
+// page like the RAM list, and the same way: a list that does not come is
+// none, and the send is all or nothing as before.
+let partsList = null;
+function loadParts() {
+  if (!partsList) {
+    const list = SETUP.ceParts
+      ? fetch(SETUP.ceParts).then(r => { if (!r.ok) throw refusal('FETCH', 'no parts list'); return r.json(); })
+        .then(l => (l && typeof l === 'object' && !Array.isArray(l) ? l : {}))
+      : Promise.resolve({});
+    partsList = list;
+    list.catch(() => { if (partsList === list) partsList = null; });
+  }
+  return partsList;
+}
+
 // `promise`, or a rejection once `ms` have passed.
 const capped = (promise, ms) => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('too slow')), ms);
@@ -207,6 +225,7 @@ const capped = (promise, ms) => new Promise((resolve, reject) => {
 // costs the Delete, never a message.
 const ownNow = () => capped(loadOwn(), 5000).catch(() => []);
 const ramNow = () => capped(loadRam(), 5000).catch(() => ({}));
+const partsNow = () => capped(loadParts(), 5000).catch(() => ({}));
 const mathEntry = async file => (await ownNow()).find(e => e.file === file) ?? null;
 
 // Whether a download's game is on the calculator, by planDelete's
@@ -570,6 +589,7 @@ async function run({ file, label, say, show }) {
   busy = true;
   changed();
   const launchRam = ramNow();
+  const partsListed = partsNow();
   try {
     const c = await connect(say);
     say(`Getting ${label}…`);
@@ -587,12 +607,14 @@ async function run({ file, label, say, show }) {
     }
     const sending = pct => say(`Sending ${label} to your calculator… ${pct}%`, pct);
     sending(0);
+    const listed = await partsListed;
     let r;
     try {
       r = await sendGame(link, files, {
         verify: 'full',
         archive: archiveMode(page, main?.name),
         launchRam: await launchRam,
+        parts: partsOf(listed, main?.name),
         onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); },
       });
     } catch (err) {
@@ -607,7 +629,7 @@ async function run({ file, label, say, show }) {
       throw err;
     }
     // `retried: 1`: the space check passed only on a second read of the calculator.
-    track('ce_send_success', { game, outcome: r.replaced.length ? 'replaced' : 'sent', route: r.route, page, ...(r.rechecked ? { retried: 1 } : {}) });
+    track('ce_send_success', { game, outcome: sendOutcome(r), route: r.route, page, ...(r.rechecked ? { retried: 1 } : {}) });
     // Nobody has played a game that just arrived, so its card asks for no stars.
     if (!r.replaced.length) freshSent.add(file);
     // A math program read back whole as a version the site served is ours, so its card turns to Delete.
@@ -617,7 +639,12 @@ async function run({ file, label, say, show }) {
     }
     if (deleteOn() || contentsWatched()) await refreshRows();
     say('');
-    show(sentHtml(r, main, asm, c), 'ok');
+    const partial = r.leftOut.length || r.added.length ? partsHtml(r, listed, main?.name, label) : null;
+    // A send that left parts out for space offers the games that could make room, as a refusal does.
+    const games = r.leftOut.length && deleteOn() && link ? await loadGames().catch(() => null) : null;
+    const list = games ? spaceList({ memory: 'archive', lastReason: 'partial', sending: file, sendingLabel: label, games, calc, say, show }) : null;
+    const box = show(sentHtml(r, main, asm, c, partial) + (list?.html ?? ''), 'ok');
+    list?.wire(box);
   } catch (err) {
     say('');
     if (err?.code === 'CANCELLED') return;
@@ -661,27 +688,52 @@ async function refreshRows() {
   await announceContents();
 }
 
+// What a send of a game with optional parts says before how to start it,
+// when it left parts out or only added the missing ones: what went, and
+// what did not with the archive to free so Send again adds it. The game's
+// entry in the parts list names them: its `base` (what the required files
+// hold), the parts, and `whole` (all of it).
+function partsHtml(r, listed, name, label) {
+  const entry = listed?.[name] ?? {};
+  let lead;
+  if (r.added.length) lead = `Sent ${esc(joinLabels(r.added))}.`;
+  else {
+    const went = typeof entry.base === 'string' ? [entry.base, ...partsOf(listed, name).map(p => p.label).filter(l => !r.leftOut.includes(l))] : [];
+    lead = went.length ? `Sent, with ${esc(joinLabels(went))}.` : 'Sent!';
+  }
+  if (!r.leftOut.length) {
+    return `<strong>${lead}</strong> ${typeof entry.whole === 'string' ? `${esc(label)} now has ${esc(entry.whole)}.` : ''}`.trim();
+  }
+  const them = r.leftOut.length === 1 ? 'it' : 'them';
+  const free = r.addKB > 0
+    ? `To add ${them}, delete about ${r.addKB.toLocaleString('en-US')} KB of programs you don't need (2nd, +, 2: Mem Management), then click ${SEND_AGAIN_HTML}`
+    : `To add ${them}, click ${SEND_AGAIN_HTML}`;
+  return `<strong>${lead}</strong> Your calculator didn't have room for ${esc(joinLabels(r.leftOut))}. ${free}`;
+}
+
 let helpPanels = 0;
-function sentHtml(r, main, asm, c) {
+function sentHtml(r, main, asm, c, partial = null) {
   const state = jailbreakState(r.route, c.tools);
   // A shell starts games from inside itself, so its sentence names no key.
   const how = !main ? '' : asm && state === 'shell' ? `Start ${main.name} from ${shellLabel(r.route, c.tools)}.`
     // A TI-Basic program: the first enter pastes prgmNAME on the home screen, the second runs it.
     : asm ? startHint(r.os, main.name) : `Press prgm, pick ${main.name}, and press enter twice.`;
   const lower = withKeyHelp(how.charAt(0).toLowerCase() + how.slice(1), 'ce');
-  const html = [];
+  // A send that left parts out says so first, and its own first words replace "Sent!".
+  const html = partial ? [`<p>${partial}</p>`] : [];
+  const sent = partial ? '' : '<strong>Sent!</strong> ';
   if (asm && state === 'missing') {
-    html.push(`<p><strong>Sent!</strong> It won't start until your calculator is jailbroken: ${jailbreakLink('jailbreak it now')}, then ${lower}</p>`);
+    html.push(`<p>${sent}It won't start until your calculator is jailbroken: ${jailbreakLink('jailbreak it now')}, then ${lower}</p>`);
   } else if (main && startHelpShown(page, asm, state)) {
     const id = `ce-help-${++helpPanels}`;
-    html.push(`<p><strong>Sent!</strong> To play it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Game didn't start?</button></p>`,
+    html.push(`<p>${sent}To play it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Game didn't start?</button></p>`,
       helpPanel(id, { route: r.route, jb: state, game: main.name, os: r.os, shell: shellLabel(r.route, c.tools) }));
   } else if (main && findHelpShown(page, r.os)) {
     const id = `ce-help-${++helpPanels}`;
-    html.push(`<p><strong>Sent!</strong> To run it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Can't find it?</button></p>`,
+    html.push(`<p>${sent}To run it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Can't find it?</button></p>`,
       findPanel(id, { route: r.route, game: main.name, os: r.os }));
   } else {
-    html.push(`<p><strong>Sent!</strong> To ${page === 'math' ? 'run' : 'play'} it, ${lower}</p>`);
+    html.push(`<p>${sent}To ${page === 'math' ? 'run' : 'play'} it, ${lower}</p>`);
   }
   for (const w of r.warnings) {
     if (w.code !== 'LOW_RAM_TO_RUN') continue;
@@ -1131,6 +1183,7 @@ function mountGame() {
   listeners.add(paint);
   changed();
   demoFeedback(show, label);
+  demoSent(show, label);
 }
 
 const ARROW = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -1292,7 +1345,10 @@ function mountSplit(card, a) {
   };
   listeners.add(paint);
   paint();
-  if (card === document.querySelector('.wp-block-media-text')) demoFeedback(show, label);
+  if (card === document.querySelector('.wp-block-media-text')) {
+    demoFeedback(show, label);
+    demoSent(show, label);
+  }
 }
 
 // ?fb=deleted on localhost paints a finished delete on the game page (on a
@@ -1301,6 +1357,27 @@ function demoFeedback(show, label) {
   if (!(PREVIEW_HOST && /[?&]fb=deleted\b/.test(location.search))) return;
   const box = show(`<p>${esc(label)} was deleted from your calculator.</p>${whyHtml()}`, 'ok');
   wireWhy(box, { game: label, label, os: '5.8.2.0012', route: 'v21' });
+}
+
+// ?sent=partial1, partial2, added or addedsome on localhost paints a finished
+// send of the first game with optional parts (one or two parts left out, a
+// Send again that added the rest or only some of it) without a calculator, to
+// look at the Sent message.
+async function demoSent(show, label) {
+  const m = PREVIEW_HOST && /[?&]sent=(partial1|partial2|added|addedsome)\b/.exec(location.search);
+  if (!m) return;
+  const listed = await partsNow();
+  const name = Object.keys(listed)[0];
+  const labels = partsOf(listed, name).map(p => p.label);
+  if (!name || labels.length < 2) return;
+  const r = {
+    partial1: { added: [], leftOut: labels.slice(-1) },
+    partial2: { added: [], leftOut: labels, addKB: 406 },
+    added: { added: labels.slice(-1), leftOut: [] },
+    addedsome: { added: labels.slice(0, 1), leftOut: labels.slice(1) },
+  }[m[1]];
+  Object.assign(r, { os: '5.8.4.0058', route: 'v21', warnings: [], addKB: r.addKB ?? 76 });
+  show(sentHtml(r, { name }, true, { tools: ['arTIfiCE v2.1'] }, partsHtml(r, listed, name, label)), 'ok');
 }
 
 function mount() {

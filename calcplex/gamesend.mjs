@@ -478,12 +478,12 @@ export function planInstall(entries, { rows, ramFree = null, archiveFree = null,
   return { steps, space, warnings };
 }
 
-/** Refuse a plan that does not fit, naming how much to free. */
-export function checkSpace({ space }) {
+/** Refuse a plan that does not fit, naming how much to free. `what` names what was being sent. */
+export function checkSpace({ space }, { what = 'this game' } = {}) {
   const { ramNeed, arcNeed, arcReserve = 0, ramFree, archiveFree, ramShort } = space;
   const arcRoom = arcNeed + arcReserve;
   if (archiveFree != null && arcRoom > archiveFree) {
-    throw refusal('NO_ARCHIVE_SPACE', `Not enough room on the calculator: this game needs ${kb(arcRoom)} KB of archive and there's ${Math.floor(archiveFree / 1024)} KB free. Delete a few programs you don't need (2nd, +, 2: Mem Management), then try again.`, { needKB: kb(arcRoom - archiveFree) });
+    throw refusal('NO_ARCHIVE_SPACE', `Not enough room on the calculator: ${what} needs ${kb(arcRoom)} KB of archive and there's ${Math.floor(archiveFree / 1024)} KB free. Delete a few programs you don't need (2nd, +, 2: Mem Management), then try again.`, { needKB: kb(arcRoom - archiveFree) });
   }
   if (ramShort > 0) {
     throw refusal('NO_RAM_SPACE', `Not enough RAM on the calculator: this game needs ${kb(ramNeed)} KB and there's ${Math.floor(ramFree / 1024)} KB free. Delete or archive a few programs you don't need (2nd, +, 2: Mem Management), then try again.`, { needKB: kb(ramShort) });
@@ -496,27 +496,88 @@ export function checkSpace({ space }) {
 // a second 0 is unknown, so no RAM refusal and no LOW_RAM_TO_RUN from it),
 // and a refusal from a first read asks the calculator once more, a 0 then
 // also unknown. Returns the plan and whether it took a second read.
-async function planThatFits(link, todo, calc, archive, launchRam) {
-  const plan = async ({ ramFree, archiveFree }, listed = null) => {
-    const rows = listed ?? await link.list();
-    return { ...planInstall(todo, { rows, ramFree, archiveFree, archive, launchRam }), rows };
+//
+// `parts` are optional parts in sending order, [{ label, names }]: when the
+// whole send is refused for archive, parts are left out from the end until
+// what is left fits, RAM included. Every file no part names is required. A
+// send refused for RAM is refused as before, and so is one whose required
+// files do not fit: with the whole send's figures, or with `what` given,
+// with the required files' figures under that name. Also returns the parts
+// left out.
+async function planThatFits(link, todo, calc, archive, launchRam, parts = [], { what = null, listed = null } = {}) {
+  const plan = async ({ ramFree, archiveFree }, rows = null, entries = todo) => {
+    rows ??= await link.list();
+    return { ...planInstall(entries, { rows, ramFree, archiveFree, archive, launchRam }), rows };
   };
-  let free = calc, rows = null;
+  const fits = p => {
+    try {
+      checkSpace(p);
+      return true;
+    } catch (err) {
+      if (err.code !== 'NO_ARCHIVE_SPACE' && err.code !== 'NO_RAM_SPACE') throw err;
+      return false;
+    }
+  };
+  const fitting = async (free, rows = null) => {
+    const whole = await plan(free, rows);
+    try {
+      checkSpace(whole);
+      return { plan: whole, leftOut: [] };
+    } catch (err) {
+      if (err.code !== 'NO_ARCHIVE_SPACE') throw err;
+      let smaller = whole;
+      for (let k = parts.length - 1; k >= 0; k--) {
+        const drop = new Set(parts.slice(k).flatMap(part => part.names));
+        smaller = await plan(free, whole.rows, todo.filter(e => !drop.has(e.name)));
+        if (fits(smaller)) return { plan: smaller, leftOut: parts.slice(k) };
+      }
+      if (what) checkSpace(smaller, { what });
+      throw err;
+    }
+  };
+  let free = calc, rows = listed;
   if (calc.ramFree === 0) {
     rows = await link.list();
     free = await freeRamAgain(link, calc);
   }
-  const first = await plan(free, rows);
   try {
-    checkSpace(first);
-    return { plan: first, rechecked: !!free.reread };
+    return { ...await fitting(free, rows), rechecked: !!free.reread };
   } catch (err) {
     if (free.reread || (err.code !== 'NO_RAM_SPACE' && err.code !== 'NO_ARCHIVE_SPACE')) throw err;
   }
   const again = await link.info();
-  const second = await plan(again.ramFree === 0 ? { ...again, ramFree: undefined } : again);
-  checkSpace(second);
-  return { plan: second, rechecked: true };
+  return { ...await fitting(again.ramFree === 0 ? { ...again, ramFree: undefined } : again), rechecked: true };
+}
+
+/**
+ * With no I/O: the parts a send only has to add. When the listing already
+ * has every required file of the game (each of its own files no part names,
+ * libraries aside) under its name and type at the size this download sends,
+ * the parts not all there at their sizes, in order; otherwise null: a
+ * required file missing or of another size (another build) means the whole
+ * game is sent. null too when nothing is missing.
+ */
+export function partsToAdd(entries, parts, rows = []) {
+  if (!parts?.length) return null;
+  const named = new Set(parts.flatMap(part => part.names));
+  const here = e => (rows ?? []).some(r => r.name === e.name && r.type === e.type && r.size === e.data.length);
+  if (!entries.filter(e => !named.has(e.name) && !library(e)).every(here)) return null;
+  const missing = parts.filter(part => !entries.filter(e => part.names.includes(e.name)).every(here));
+  return missing.length ? missing : null;
+}
+
+// After a send that left parts out: the archive to free before sending again
+// adds them (that send only adds parts, with the libraries), by the space
+// check's rule, against free archive read again now (estimated from the plan
+// if that read fails).
+async function roomToAdd(link, entries, archive, plan) {
+  const { space } = planInstall(entries, { rows: [], archiveFree: 0, archive });
+  let free = null;
+  try {
+    free = (await link.info()).archiveFree;
+  } catch { /* the estimate below */ }
+  if (!Number.isFinite(free)) free = Math.max(0, (plan.space.archiveFree ?? 0) - plan.space.arcNeed);
+  return Math.max(0, kb(space.arcNeed + space.arcReserve - free));
 }
 
 /**
@@ -531,13 +592,22 @@ async function planThatFits(link, todo, calc, archive, launchRam) {
  *                            every AppVar archived too, and below 5.3 is also 'file'; 'all'
  *                            archives all
  *   launchRam                measured free RAM to start, as ramToStart takes it
- * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked, verify }. A
+ *   parts                    the game's optional parts in sending order, [{ label, names }]:
+ *                            when the whole game does not fit in archive, as many as fit, from
+ *                            the first (planThatFits); when the calculator already has the
+ *                            game with some parts missing (partsToAdd), only the libraries and
+ *                            the missing parts go, as many as fit, and a refusal names the
+ *                            first missing part
+ * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked, verify,
+ * added, leftOut, addKB }: `added` the labels of the parts a send that only added parts
+ * sent (otherwise []), `leftOut` those of the parts not sent (none: []), and with any,
+ * `addKB`, the archive to free before sending again adds them. A
  * failure part way carries `partial`, the names already on the calculator,
  * and `removed`, names deleted whose new copy never landed. A variable the
  * calculator refused for space may still be listed, empty, under its name;
  * one this send created is deleted again and named in `emptied`.
  */
-export async function sendGame(openLink, files, { onProgress = null, onStep = null, verify = 'full', archive = 'file', launchRam = null } = {}) {
+export async function sendGame(openLink, files, { onProgress = null, onStep = null, verify = 'full', archive = 'file', launchRam = null, parts = [] } = {}) {
   const todo = collectEntries(files);
   const link = readyEach(openLink);
   const calc = await identify(link);
@@ -546,7 +616,13 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
     throw refusal('NO_JAILBREAK', `There's no jailbreak for OS ${calc.os} yet, so this game can't run on it. Nothing was sent.`);
   }
   const mode = (archive === 'programs' || archive === 'programs+appvars') && !launchesArchived(calc.os) ? 'file' : archive;
-  const { plan, rechecked } = await planThatFits(link, todo, calc, mode, launchRam);
+  // A game already there with parts missing gets only those, with the libraries.
+  const rows = parts?.length ? await link.list() : null;
+  const missing = partsToAdd(todo, parts, rows);
+  const adding = missing ? new Set(missing.flatMap(part => part.names)) : null;
+  const { plan, rechecked, leftOut } = missing
+    ? await planThatFits(link, todo.filter(e => library(e) || adding.has(e.name)), calc, mode, launchRam, missing.slice(1), { what: missing[0].label, listed: rows })
+    : await planThatFits(link, todo, calc, mode, launchRam, parts ?? [], { listed: rows });
   const total = plan.steps.reduce((n, s) => n + s.entry.data.length, 0);
   let before = 0, sending = null;
   const sent = [], replaced = [], removed = new Set();
@@ -585,7 +661,13 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
     throw err;
   }
   const archived = plan.steps.filter(s => s.archived).map(s => s.entry.name);
-  return { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked, verify };
+  const added = missing ? missing.filter(part => !leftOut.includes(part)).map(part => part.label) : [];
+  const r = { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked, verify, added, leftOut: leftOut.map(part => part.label) };
+  if (leftOut.length) {
+    const rest = new Set(leftOut.flatMap(part => part.names));
+    r.addKB = await roomToAdd(link, todo.filter(e => library(e) || rest.has(e.name)), mode, plan);
+  }
+  return r;
 }
 
 /**

@@ -591,12 +591,15 @@ export function platformName(nav) {
 //                Send only arTIfiCE, counted before the send
 //   outcome      ce_delete: deleted | nothing (none of the game's files was there) | failed |
 //                not_ours (the math page: a program by that name is there, but its content is
-//                no version the page served, so nothing was deleted)
+//                no version the page served, so nothing was deleted);
+//                ce_send_success: sent | replaced (a copy was already there) | added (the game was
+//                there with optional parts missing, and the send added them all) | partial (some
+//                of the game's optional parts were left out for archive space; sendOutcome)
 //   freed_kb     ce_delete, deleted only: KB of the game's or program's own files removed,
 //                rounded up
 //   last_reason  ce_delete and ce_delete_reason for a delete offered by the list of games
 //                under a send refused for space: that refusal's reason (no_space | no_ram |
-//                calc_error_12)
+//                calc_error_12), or partial under a send that left optional parts out
 //   page         ce_key_help, the first time a page shows the prgm key's picture: hub | game |
 //                math | installer; ce_delete and ce_delete_reason: hub | game | math;
 //                ce_rate: hub | game | math
@@ -775,6 +778,26 @@ export const ARCHIVE_ALL_APPVARS = ['AGD'];
 export function archiveMode(page, main = null) {
   return ARCHIVE_ALL_APPVARS.includes(main) ? 'programs+appvars' : 'programs';
 }
+
+/** ce_send_success's `outcome` for sendGame's result: partial, then added, then replaced, then sent. */
+export function sendOutcome(r) {
+  return r.leftOut?.length ? 'partial' : r.added?.length ? 'added' : r.replaced?.length ? 'replaced' : 'sent';
+}
+
+/**
+ * A game's optional parts, as sendGame takes them, from the site's list of
+ * them ({ NAME: { base, whole, parts: [{ label, names }] } }, by main program name),
+ * or [] for a game the list does not cover or a malformed entry.
+ */
+export function partsOf(list, main) {
+  const g = list?.[main];
+  const ok = g && typeof g.base === 'string' && Array.isArray(g.parts) && g.parts.length
+    && g.parts.every(p => p && typeof p.label === 'string' && Array.isArray(p.names) && p.names.length && p.names.every(n => typeof n === 'string'));
+  return ok ? g.parts : [];
+}
+
+/** Labels as a sentence takes them: 'a', 'a and b', 'a, b and c'. */
+export const joinLabels = labels => (labels.length < 2 ? labels.join('') : `${labels.slice(0, -1).join(', ')} and ${labels.at(-1)}`);
 
 /** ce_jb_prompt's `choice`: either button by its name, and any other close (Escape, a click outside) as cancel. */
 export function jbPromptChoice(closedWith) {
