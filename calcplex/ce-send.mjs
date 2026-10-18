@@ -64,6 +64,15 @@ const INSTALLER = SETUP.ceInstaller || '/ti84plusce-jailbreak-installer/';
 const INSTALLER_TARGET = /^https?:\/\//.test(INSTALLER) ? ' target="_blank" rel="noopener"' : '';
 const HUB = '/downloads/ti84plusce/games/';
 const MATH = '/downloads/ti84plusce/math/';
+// Send first (data-ce-first on a game page's script tag): the connect card leads, one centred split in every state
+// (Connect, Send or Delete, with "Download .zip" under its arrow) in place of
+// the hidden download button, and a failed connect or send offers the file.
+// A DOWNLOAD_FIRST game takes two steps in the same card: its download as the
+// card's button (GATE_TEXT), then the Connect split.
+const FIRST = SETUP.ceFirst != null;
+const GATE_TEXT = label => `${esc(label)}'s author asked that the license and readme come with the game, so download it first and read them. Then you can send it here.`;
+const GATE_DONE = 'Downloaded. Now connect your calculator to send it.';
+const firstLabel = file => `Download .${file.split('.').pop().toLowerCase()}`;
 
 // ?win=1 and ?cros=1 preview the Windows and Chrome OS wording on localhost.
 const WIN = isWindows(navigator) || (PREVIEW_HOST && /[?&]win=1\b/.test(location.search));
@@ -104,6 +113,9 @@ const DOWNLOAD_FIRST = {
 // Download links painted here keep the page's vignette opt-out.
 const downloadLinkAttrs = () =>
   (document.querySelector('a[href^="/downloads/ce/"][data-google-vignette="false"]') ? ' data-google-vignette="false"' : '');
+// Send first: under a failed connect or send, the file (not for a TI-84 Evo, sent to its own page).
+const failDownload = (file, err) => (FIRST && failReason(err) !== 'evo'
+  ? `<p class="ce-fail-dl"><a href="${esc(encodeURI(file))}"${downloadLinkAttrs()}>Download the file instead</a></p>` : '');
 const decodedHref = a => {
   try { return decodeURI(a.getAttribute('href')); } catch { return a.getAttribute('href'); }
 };
@@ -125,8 +137,12 @@ function watchDownloads(root) {
     if (!a) return;
     const file = decodedHref(a);
     markDownloaded(file);
+    // Send first: a DOWNLOAD_FIRST card moves on to Connect, after the click's own
+    // download (a link the repaint removed mid-click would not download).
+    if (FIRST) setTimeout(changed, 0);
     const params = downloadParams(file, page, link && calc);
-    if (params) track('ce_download', params);
+    // `from: 'fail'`: the Send-first link under a failed connect or send.
+    if (params) track('ce_download', a.closest('.ce-fail-dl') ? { ...params, from: 'fail' } : params);
   });
 }
 
@@ -583,6 +599,17 @@ async function run({ file, label, say, show }) {
   if (busy || connecting) return;
   const gate = DOWNLOAD_FIRST[file];
   if (gate && !wasDownloaded(file)) {
+    // Send first: the game page's card goes back to its Download step, never a warning.
+    if (FIRST && page === 'game') {
+      changed();
+      return;
+    }
+    // This site's own hub (a tag with no data-ce-* layout setup): the same
+    // neutral first step in the card's message, with the card's download.
+    if (!SETUP.cePage) {
+      show(`<p>${GATE_TEXT(label)}</p><p><a class="ce-gate-go" href="${esc(encodeURI(file))}"${downloadLinkAttrs()}>Download ${esc(label)}</a></p>`, 'gate');
+      return;
+    }
     show(`<p>${gate(t => `<a href="${esc(encodeURI(file))}" class="ce-gate-dl"${downloadLinkAttrs()}><strong>${t}</strong></a>`)}</p>`, 'warn');
     return;
   }
@@ -655,7 +682,7 @@ async function run({ file, label, say, show }) {
     // every message on a game the calculator has: its main button is Delete.
     const again = asksSendAgain(err)
       || (deleteOn() && link && calc ? await gameOnCalculator(file, label, calc.rows, { fetchGame: page === 'game' }).catch(() => false) : false);
-    const text = `<p>${errorHtml(err)}${again ? ` ${SEND_AGAIN_HTML}` : ''}</p>`;
+    const text = `<p>${errorHtml(err)}${again ? ` ${SEND_AGAIN_HTML}` : ''}</p>${failDownload(file, err)}`;
     if (games) {
       const list = spaceList({ memory, lastReason: failReason(err), sending: file, sendingLabel: label, games, calc: refusedBy, say, show });
       list.wire(show(text + list.html, 'bad'));
@@ -1152,7 +1179,7 @@ function mountGame() {
       return;
     }
     clearResult();
-    await connectFromClick(say, err => show(`<p>${errorHtml(err)}</p>`, 'bad'));
+    await connectFromClick(say, err => show(`<p>${errorHtml(err)}</p>${failDownload(file, err)}`, 'bad'));
     say('');
   };
   const remove = () => removeGame({ file, label, say, show });
@@ -1167,17 +1194,25 @@ function mountGame() {
     const connected = !!(link && calc);
     const onCalc = connected && here();
     rate(onCalc);
-    msg.innerHTML = connected || connecting
+    // Send first, a DOWNLOAD_FIRST game: its download is step one, in Connect's place.
+    const gateGame = FIRST && !!DOWNLOAD_FIRST[file];
+    const gated = gateGame && !onCalc && !wasDownloaded(file);
+    msg.innerHTML = gated ? GATE_TEXT(label) : connected || connecting
       ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : 'Click Send to calculator to install it.')
-      : parked && parkedFor === 'page' ? IN_OTHER_TAB : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
+      : parked && parkedFor === 'page' ? IN_OTHER_TAB : gateGame ? GATE_DONE : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
     const kind = statusKind();
     card.className = 'ce-conn is-leaf' + (kind ? ' ' + kind : outcome === 'bad' ? ' bad' : '');
-    const want = !connected ? 'connect' : onCalc ? 'delete' : 'send';
+    const want = gated ? 'gate' : !connected ? 'connect' : onCalc ? 'delete' : 'send';
     if (want !== mode) {
       mode = want;
-      if (mode === 'delete') {
-        actions.innerHTML = `<div class="ce-split ce-leaf-split is-delete">${splitHtml(mode, { href, label })}</div>`;
-        wireSplit(actions.firstElementChild, mode, { send, remove });
+      // Send first: the gate's download, then every state is the split, the
+      // download under its arrow (the page's HTML already holds the Connect
+      // one in these words).
+      if (mode === 'gate') {
+        actions.innerHTML = `<a class="ce-conn-go ce-gate-go" href="${href}"${downloadLinkAttrs()}>Download ${esc(label)}</a>`;
+      } else if (mode === 'delete' || FIRST) {
+        actions.innerHTML = `<div class="ce-split ce-leaf-split${mode === 'delete' ? ' is-delete' : ''}">${splitHtml(mode, { href, label, dl: FIRST ? firstLabel(file) : '' })}</div>`;
+        wireSplit(actions.firstElementChild, mode, { send: mode === 'connect' ? go : send, remove });
       } else {
         actions.innerHTML = `<button type="button" class="ce-conn-go">${mode === 'send' ? 'Send to calculator' : 'Connect your calculator'}</button>`;
         actions.firstElementChild.onclick = go;
@@ -1210,10 +1245,11 @@ function watchMenus() {
 // A split button's halves: the main one is what the student can do now, the
 // arrow offers the rest. 'download' (no calculator yet), 'send', or 'delete'
 // (the game is on the calculator: Send again comes first under the arrow).
-function splitHtml(mode, { href, label }) {
+function splitHtml(mode, { href, label, dl = '' }) {
   const button = 'wp-block-button__link no-border-radius';
-  const download = `<a role="menuitem" href="${href}"${downloadLinkAttrs()}>Download file</a>`;
+  const download = `<a role="menuitem" href="${href}"${downloadLinkAttrs()}>${esc(dl || 'Download file')}</a>`;
   const [main, items] = {
+    connect: [`<button type="button" class="${button} ce-split-main">Connect your calculator</button>`, download],
     download: [`<a class="${button} ce-split-main" href="${href}"${downloadLinkAttrs()}>Download</a>`,
       '<button type="button" role="menuitem" class="ce-split-send">Send to calculator</button>'],
     send: [`<button type="button" class="${button} ce-split-main">Send to calculator</button>`, download],
