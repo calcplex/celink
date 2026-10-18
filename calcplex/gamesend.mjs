@@ -671,14 +671,25 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
 }
 
 /**
+ * The CE C libraries' AppVar names (CE-Programming toolchain, LibLoad and the
+ * libraries its clibs.8xg carries, plus GRAPHC). planDelete never takes a
+ * save of one of these names, whatever the save list says.
+ */
+export const LIBRARY_NAMES = ['LibLoad', 'GRAPHX', 'FILEIOC', 'KEYPADC', 'FONTLIBC', 'USBDRVCE', 'SRLDRVCE', 'MSDDRVCE', 'FATDRVCE', 'LCDDRVCE', 'GRAPHC'];
+
+/**
  * With no I/O: which listed variables deleting a game removes. Only what
  * this game's files put there: the same name and type, never a C library,
  * and never a name in `keep` (one another game also sends). A listed name
  * of another type is the student's own and is `skipped`. Programs come
  * first, then data, so a delete that stops half way never leaves a program
- * without its data. Resolves { remove, skipped }, both listing rows.
+ * without its data. `saves` ([name, type] pairs) are the files the game
+ * itself writes while it runs (high scores, settings): they go last, only a
+ * listed row of that exact name and type, never a library's name or a kept
+ * one. A save that is not listed is simply not there. Resolves
+ * { remove, skipped }, both listing rows.
  */
-export function planDelete(entries, rows = [], { keep = [] } = {}) {
+export function planDelete(entries, rows = [], { keep = [], saves = [] } = {}) {
   const remove = [], skipped = [];
   const own = entries.filter(e => !library(e) && !keep.includes(e.name));
   const rank = e => (PROGRAMS.includes(e.type) ? 0 : 1);
@@ -686,6 +697,12 @@ export function planDelete(entries, rows = [], { keep = [] } = {}) {
     for (const r of rows ?? []) {
       if (r.name !== e.name) continue;
       (r.type === e.type ? remove : skipped).push(r);
+    }
+  }
+  for (const [name, type] of saves ?? []) {
+    if (LIBRARY_NAMES.includes(name) || keep.includes(name)) continue;
+    for (const r of rows ?? []) {
+      if (r.name === name && r.type === type && !remove.includes(r)) remove.push(r);
     }
   }
   return { remove, skipped };
@@ -698,17 +715,18 @@ export function planDelete(entries, rows = [], { keep = [] } = {}) {
  * if `own` has its name and type and it reads back, now, as one of those
  * versions; any other row goes to `notOurs` and stays (a row `own` does not
  * name is never read). A read refused the way a running program refuses is
- * thrown with `runningRead`. Without `own`, by planDelete's rule alone.
+ * thrown with `runningRead`. Without `own`, by planDelete's rule alone,
+ * `saves` included (with `own`, saves are not considered).
  * Resolves { deleted, bytes, rows, notOurs }: the names deleted, their
  * listed size, the listing after, and the rows left alone. A failure part
  * way carries `deleted`, the names already gone. A name the calculator
  * acknowledged and still lists is a READBACK refusal.
  */
-export async function deleteGame(openLink, files, { keep = [], own = null } = {}) {
+export async function deleteGame(openLink, files, { keep = [], own = null, saves = [] } = {}) {
   const entries = collectEntries(files);
   const link = readyEach(openLink);
   const before = await link.list();
-  const { remove: picked } = planDelete(entries, before, { keep });
+  const { remove: picked } = planDelete(entries, before, { keep, saves: own == null ? saves : [] });
   const deleted = [], notOurs = [];
   let bytes = 0;
   try {

@@ -954,6 +954,9 @@ function followSpaceLists() {
 async function removeGame({ file, label, say, show, space = null }) {
   closeMenus();
   if (busy || !(link && calc)) return;
+  // The files the game writes while it runs (high scores, settings), from the
+  // games list; without the list, the game's own files only.
+  const saves = byContent() ? [] : ((await capped(loadGames(), 5000).catch(() => null))?.find(g => g.file === file)?.saves ?? []);
   if (await askDelete(label) !== 'delete' || busy) return;
   if (space && calc && calc !== space.calc) return;
   // After a delete from the out-of-space list, the refused game is one click
@@ -986,7 +989,7 @@ async function removeGame({ file, label, say, show, space = null }) {
     // now; without its list entry, nothing (own: []).
     const r = byContent()
       ? await deleteGame(link, files, { keep: KEEP, own: [await mathEntry(file)].filter(Boolean) })
-      : await deleteGame(link, files, { keep: KEEP });
+      : await deleteGame(link, files, { keep: KEEP, saves });
     // Both in one tick, so each card checks once: its presence follows `rows` and `owned`.
     if (calc) {
       calc.owned = ownedAfterDelete(calc.owned, r);
