@@ -72,6 +72,7 @@ const MATH = '/downloads/ti84plusce/math/';
 const FIRST = SETUP.ceFirst != null;
 const GATE_TEXT = label => `${esc(label)}'s author asked that the license and readme come with the game, so download it first and read them. Then you can send it here.`;
 const GATE_DONE = 'Downloaded. Now connect your calculator to send it.';
+const GATE_SEND = 'Downloaded. Now click Send to calculator to send it.';
 const firstLabel = file => `Download .${file.split('.').pop().toLowerCase()}`;
 
 // ?win=1 and ?cros=1 preview the Windows and Chrome OS wording on localhost.
@@ -607,7 +608,10 @@ async function run({ file, label, say, show }) {
     // This site's own hub (a tag with no data-ce-* layout setup): the same
     // neutral first step in the card's message, with the card's download.
     if (!SETUP.cePage) {
-      show(`<p>${GATE_TEXT(label)}</p><p><a class="ce-gate-go" href="${esc(encodeURI(file))}"${downloadLinkAttrs()}>Download ${esc(label)}</a></p>`, 'gate');
+      const box = show(`<p>${GATE_TEXT(label)}</p><p><a class="ce-gate-go" href="${esc(encodeURI(file))}"${downloadLinkAttrs()}>Download ${esc(label)}</a></p>`, 'gate');
+      // After the click's own download, the message says what comes next.
+      box?.querySelector('.ce-gate-go')?.addEventListener('click', () =>
+        setTimeout(() => show(`<p>${GATE_SEND}</p>`, 'gate'), 0));
       return;
     }
     show(`<p>${gate(t => `<a href="${esc(encodeURI(file))}" class="ce-gate-dl"${downloadLinkAttrs()}><strong>${t}</strong></a>`)}</p>`, 'warn');
