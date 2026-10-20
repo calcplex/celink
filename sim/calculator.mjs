@@ -111,6 +111,9 @@ export class SimulatedCalculator {
     renegotiate = null,         // { afterPackets, size }: ask for a new buffer size mid-stream
     lowBattery = false,         // refuse an application send with 0x002B
     refuse = null,              // { step, code, times }: answer that step with an error (steps in STEPS)
+    defragMs = null,            // an archived Request to Send is answered with a 480,000 us delay, then
+                                // this many ms of silence before the acknowledgement: a defragment, as
+                                // observed on hardware (OS 5.8.5); settable at any time
     emptyOnFull = false,        // an archived send refused for space leaves an empty variable in RAM
                                 // under its name, as observed in an emulator running OS 5.8.5
     running = false,            // a program running on the calculator; settable at any time
@@ -147,6 +150,7 @@ export class SimulatedCalculator {
     this.delays = new Map(Object.entries(delays).map(([k, v]) => [+k, [].concat(v)]));
     this.renegotiate = renegotiate;
     this.lowBattery = lowBattery;
+    this.defragMs = defragMs;
     this.refuse = refuse && { times: Infinity, ...refuse };
     this.emptyOnFull = emptyOnFull;
     this.running = running;
@@ -688,6 +692,11 @@ export class SimulatedCalculator {
       return this._queueError(SIM_ERR.NO_MEMORY);
     }
     this._expectContents({ name, type, size, archived, version: version ? version[3] : 0 });
+    if (archived && this.defragMs != null) {
+      this._queueDelay(480000);
+      setTimeout(() => this.queueVirtual(0xAA00, [0x01]), this.defragMs);
+      return;
+    }
     this.queueVirtual(0xAA00, [0x01]);
   }
 

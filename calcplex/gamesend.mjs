@@ -584,6 +584,8 @@ async function roomToAdd(link, entries, archive, plan) {
  * Send a game over an open link. `files` is the bytes of each of its files.
  *   onProgress(done, total)  bytes across every variable
  *   onStep(step, name)       'delete', 'send' or 'verify'
+ *   onBusy()                 the calculator asked for a delay and then went quiet: a CE does
+ *                            that while it defragments its archive (CELink send)
  *   verify                   'full' reads each variable back; 'size' lists once at the end
  *   archive                  'file' stores each variable where its file says; 'programs' puts
  *                            every program in archive on an OS that starts archived programs
@@ -599,15 +601,16 @@ async function roomToAdd(link, entries, archive, plan) {
  *                            the missing parts go, as many as fit, and a refusal names the
  *                            first missing part
  * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked, verify,
- * added, leftOut, addKB }: `added` the labels of the parts a send that only added parts
+ * added, leftOut, addKB, defrag }: `added` the labels of the parts a send that only added parts
  * sent (otherwise []), `leftOut` those of the parts not sent (none: []), and with any,
- * `addKB`, the archive to free before sending again adds them. A
+ * `addKB`, the archive to free before sending again adds them; `defrag` whether onBusy
+ * was called (an error carries `defrag: true` too). A
  * failure part way carries `partial`, the names already on the calculator,
  * and `removed`, names deleted whose new copy never landed. A variable the
  * calculator refused for space may still be listed, empty, under its name;
  * one this send created is deleted again and named in `emptied`.
  */
-export async function sendGame(openLink, files, { onProgress = null, onStep = null, verify = 'full', archive = 'file', launchRam = null, parts = [] } = {}) {
+export async function sendGame(openLink, files, { onProgress = null, onStep = null, onBusy = null, verify = 'full', archive = 'file', launchRam = null, parts = [] } = {}) {
   const todo = collectEntries(files);
   const link = readyEach(openLink);
   const calc = await identify(link);
@@ -624,7 +627,8 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
     ? await planThatFits(link, todo.filter(e => library(e) || adding.has(e.name)), calc, mode, launchRam, missing.slice(1), { what: missing[0].label, listed: rows })
     : await planThatFits(link, todo, calc, mode, launchRam, parts ?? [], { listed: rows });
   const total = plan.steps.reduce((n, s) => n + s.entry.data.length, 0);
-  let before = 0, sending = null;
+  let before = 0, sending = null, defrag = false;
+  const busy = () => { defrag = true; onBusy?.(); };
   const sent = [], replaced = [], removed = new Set();
   try {
     for (const s of plan.steps) {
@@ -636,7 +640,7 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
       }
       onStep?.('send', e.name);
       sending = s;
-      await link.send(e, { archive: s.archived, onProgress: onProgress ? done => onProgress(before + done, total) : undefined });
+      await link.send(e, { archive: s.archived, onBusy: busy, onProgress: onProgress ? done => onProgress(before + done, total) : undefined });
       sending = null;
       before += e.data.length;
       removed.delete(e.name);
@@ -654,6 +658,7 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   } catch (err) {
     err.partial = sent.slice();
     err.removed = [...removed];
+    if (defrag) err.defrag = true;
     if (sending && err?.code === 'CALC_ERROR') {
       const gone = await dropEmpty(link, sending, plan.rows);
       if (gone) err.emptied = [gone];
@@ -662,7 +667,7 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   }
   const archived = plan.steps.filter(s => s.archived).map(s => s.entry.name);
   const added = missing ? missing.filter(part => !leftOut.includes(part)).map(part => part.label) : [];
-  const r = { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked, verify, added, leftOut: leftOut.map(part => part.label) };
+  const r = { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked, verify, added, leftOut: leftOut.map(part => part.label), defrag };
   if (leftOut.length) {
     const rest = new Set(leftOut.flatMap(part => part.names));
     r.addKB = await roomToAdd(link, todo.filter(e => library(e) || rest.has(e.name)), mode, plan);

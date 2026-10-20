@@ -71,6 +71,13 @@ const DELETE_OWNER = 0x0B;
 const TIMEOUT_MS = 3000;
 const STREAM_TIMEOUT_MS = 15000;
 const APP_TIMEOUT_MS = 30000;
+// After a Delay Acknowledgement the calculator may say nothing for a long
+// time: a CE that must defragment its archive before it can take a variable
+// answers the Request to Send with a delay, then is silent until the
+// defragment is over (observed on hardware: 26 s, twice, OS 5.8.5).
+const BUSY_TIMEOUT_MS = 180000;
+// How long that silence lasts before onBusy is called.
+const BUSY_NOTICE_MS = 2000;
 const CLEAR_HALT_MS = 500;
 // Leftover packets ready() acknowledges or skips before the buffer answer.
 const MAX_STALE_PACKETS = 8;
@@ -405,6 +412,9 @@ export class CELink {
    * take a while to archive, and `appTimeout` for a Flash application, which it
    * erases and writes before each acknowledgement. They are longer than
    * libticables' 1.5 s because here a timeout closes the link (see LINK_LOST).
+   * `busyTimeout` replaces any of them once the calculator has asked for a
+   * delay before its reply: a CE defragmenting its archive does that, then
+   * says nothing until it is done.
    */
   static fromDevice(device, options) {
     return new CELink(device, options);
@@ -424,6 +434,7 @@ export class CELink {
   #timeout;
   #streamTimeout;
   #appTimeout;
+  #busyTimeout;
   #in = null;
   #out = null;
   #rx = new Uint8Array(0);
@@ -432,12 +443,13 @@ export class CELink {
   #op = null;
   #closedReason = null;
 
-  constructor(device, { timeout = TIMEOUT_MS, streamTimeout = STREAM_TIMEOUT_MS, appTimeout = APP_TIMEOUT_MS } = {}) {
+  constructor(device, { timeout = TIMEOUT_MS, streamTimeout = STREAM_TIMEOUT_MS, appTimeout = APP_TIMEOUT_MS, busyTimeout = BUSY_TIMEOUT_MS } = {}) {
     if (!device) throw new CELinkError('NO_DEVICE', 'No USB device was given.');
     this.device = device;
     this.#timeout = timeout;
     this.#streamTimeout = streamTimeout;
     this.#appTimeout = appTimeout;
+    this.#busyTimeout = busyTimeout;
   }
 
   /** Data bytes per raw packet under the negotiated allocation; null until ready. */
@@ -555,8 +567,12 @@ export class CELink {
    * restart can reject that very write although every USB packet was taken.
    * The send then resolves with `rebooted: true`, and the link stays closed
    * until the next open().
+   *
+   * `onBusy` is called, at most once per reply, when the calculator asked for
+   * a delay and then stays silent: a CE does that while it defragments its
+   * archive to make room, which can take half a minute or more.
    */
-  async send(entry, { archive = !!entry?.archived, onProgress, rebootOnLanding = false } = {}) {
+  async send(entry, { archive = !!entry?.archived, onProgress, onBusy, rebootOnLanding = false } = {}) {
     if (!(entry?.data instanceof Uint8Array)) throw new CELinkError('BAD_ENTRY', 'send() needs a variable entry with its data (from parseFile or makeEntry).');
     if (entry.type === TYPE.FLASH_APP) throw new CELinkError('UNSUPPORTED_TYPE', 'This is a Flash application: send it with sendApp().');
     const size = entry.data.length;
@@ -566,7 +582,7 @@ export class CELink {
       attribute(ATTR.VERSION, [0, 0, 0, entry.version ?? 0]));
     return this.#run('send', async () => {
       await this.#sendVirtual(VPKT.RTS, rts);
-      await this.#expect([VPKT.DATA_ACK], 'rts');
+      await this.#expect([VPKT.DATA_ACK], 'rts', this.#timeout, onBusy);
       onProgress?.(0, size);
       let landing = false;
       try {
@@ -575,7 +591,7 @@ export class CELink {
           onProgress: contentsProgress(onProgress, size),
           onLastPacket: () => { landing = true; },
         });
-        await this.#expect([VPKT.DATA_ACK], 'contents', this.#streamTimeout);
+        await this.#expect([VPKT.DATA_ACK], 'contents', this.#streamTimeout, onBusy);
         await this.#sendVirtual(VPKT.EOT);
       } catch (e) {
         if (!(rebootOnLanding && landing && LINK_DROPS.includes(e.code))) throw e;
@@ -758,17 +774,37 @@ export class CELink {
     }
   }
 
-  /** Read virtual packets until one of `types`. `step` names the reply in a CALC_ERROR. */
-  async #expect(types, step, timeout = this.#timeout) {
-    const deadline = performance.now() + timeout;
+  /**
+   * Read virtual packets until one of `types`. `step` names the reply in a
+   * CALC_ERROR. Once the calculator has asked for a delay, each read may take
+   * up to the busy timeout, and `onBusy` is called once if the calculator
+   * then stays silent for BUSY_NOTICE_MS.
+   */
+  async #expect(types, step, timeout = this.#timeout, onBusy = null) {
+    let wait = timeout;
+    let deadline = performance.now() + timeout;
+    let delayed = false;
     for (;;) {
-      const v = await this.#readVirtual(timeout);
+      const notice = delayed && onBusy ? setTimeout(() => { onBusy(); onBusy = null; }, BUSY_NOTICE_MS) : null;
+      let v;
+      try {
+        v = await this.#readVirtual(wait);
+      } finally {
+        clearTimeout(notice);
+      }
       if (v.type === VPKT.DELAY_ACK) {
         // libticalcs reads 4 bytes whatever arrived; a shorter delay gets the longest wait it could.
         const us = v.data.length >= 4 ? Math.min(readBe32(v.data, 0), DELAY_CAP_US) : DELAY_CAP_US;
         await sleep(Math.floor(us / 1000));
-        // libticalcs takes one delay per reply. Later ones are waited out too,
-        // since refusing them could only lose a send; the deadline bounds them.
+        // libticalcs takes one delay per reply and then waits its usual 1.5 s.
+        // Here the reply may take the busy timeout (a defragment is silent),
+        // later delays are waited out too, since refusing them could only lose
+        // a send, and the deadline bounds them.
+        if (!delayed) {
+          delayed = true;
+          wait = Math.max(timeout, this.#busyTimeout);
+          deadline = Math.max(deadline, performance.now() + wait);
+        }
         if (performance.now() > deadline) throw new CELinkError('TIMEOUT', `The calculator kept asking for more time (${step}).`);
         continue;
       }

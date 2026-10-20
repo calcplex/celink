@@ -279,6 +279,7 @@ function presence(file, label, repaint, { fetchGame }) {
 }
 
 // A running game stops the calculator answering USB; quitting the game is enough (observed on hardware).
+const DEFRAG_TEXT = 'Your calculator is defragmenting its memory to make room. This can take a minute. Keep it plugged in.';
 const LOST_TEXT = 'The calculator stopped responding. If a game is running on it, quit the game and try again. Otherwise, unplug it, plug it back in, and try again.';
 // The math page's things are programs.
 const LOST_TEXT_MATH = 'The calculator stopped responding. If a program is running on it, quit it and try again. Otherwise, unplug it, plug it back in, and try again.';
@@ -636,7 +637,8 @@ async function run({ file, label, say, show }) {
       if (choice !== 'send_anyway') return;
       sendAnyway = true;
     }
-    const sending = pct => say(`Sending ${label} to your calculator… ${pct}%`, pct);
+    let pct = 0;
+    const sending = p => { pct = p; say(`Sending ${label} to your calculator… ${p}%`, p); };
     sending(0);
     const listed = await partsListed;
     let r;
@@ -647,9 +649,11 @@ async function run({ file, label, say, show }) {
         launchRam: await launchRam,
         parts: partsOf(listed, main?.name),
         onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); },
+        // The calculator shows "Defragmenting..." meanwhile; the next progress replaces this.
+        onBusy: () => say(DEFRAG_TEXT, pct),
       });
     } catch (err) {
-      track('ce_send_fail', { game, reason: failReason(err), page, ...refusedAt(err) });
+      track('ce_send_fail', { game, reason: failReason(err), page, ...refusedAt(err), ...(err?.defrag ? { defrag: 1 } : {}) });
       if (linkDead(err)) await drop();
       // A send that stopped part way may have left files, which Delete offers to remove.
       // On the math page a copy it may have changed is no longer known to be ours.
@@ -660,7 +664,7 @@ async function run({ file, label, say, show }) {
       throw err;
     }
     // `retried: 1`: the space check passed only on a second read of the calculator.
-    track('ce_send_success', { game, outcome: sendOutcome(r), route: r.route, page, ...(r.rechecked ? { retried: 1 } : {}) });
+    track('ce_send_success', { game, outcome: sendOutcome(r), route: r.route, page, ...(r.rechecked ? { retried: 1 } : {}), ...(r.defrag ? { defrag: 1 } : {}) });
     // A game that just arrived gets stars too; a vote on it carries the minutes since this send.
     if (!r.replaced.length) rememberSend('ce:' + file);
     // A math program read back whole as a version the site served is ours, so its card turns to Delete.

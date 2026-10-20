@@ -56,12 +56,12 @@ one at a time, in order.
 |---|---|
 | `CELink.request(options)` | Shows the browser's picker for TI devices and wraps the one chosen, with `fromDevice`'s options. Call it from a click, once per click |
 | `CELink.granted()` | The TI devices the page may already use |
-| `CELink.fromDevice(device, { timeout, streamTimeout, appTimeout })` | Wraps a `USBDevice`. Timeouts are per transfer: 3 s, 15 s for variable contents, 30 s for a Flash application |
+| `CELink.fromDevice(device, { timeout, streamTimeout, appTimeout, busyTimeout })` | Wraps a `USBDevice`. Timeouts are per transfer: 3 s, 15 s for variable contents, 30 s for a Flash application. `busyTimeout` (180 s) replaces them for a reply the calculator delayed first: a CE that must defragment its archive sends a delay, then nothing until it is done (26 s observed on hardware) |
 | `open()`, `close()` | Claim and release interface 0. Nothing goes over the cable until `ready()` |
 | `ready()` | libticalcs' `is_ready`: negotiate the packet size and set the normal mode. Required before the first operation |
 | `info()` | Product name and number, OS and boot versions, hardware version, free RAM and archive, screen size, battery, home screen; `params` holds every raw value |
 | `list()` | `[{ name, type, typeName, size, archived }]` for variables and applications |
-| `send(entry, { archive, onProgress, rebootOnLanding })` | Sends one variable, replacing one of the same name and type; `archive` defaults to the entry's own flag. Resolves `{ name, bytes, rebooted }` |
+| `send(entry, { archive, onProgress, onBusy, rebootOnLanding })` | Sends one variable, replacing one of the same name and type; `archive` defaults to the entry's own flag. `onBusy()` is called once when the calculator delayed its reply and then stays silent for 2 s (a defragment). Resolves `{ name, bytes, rebooted }` |
 | `sendFile(file, options)` | Sends every variable of a `.8xp`, `.8xv` or `.8xg`, as `parseFile` returned it, in order |
 | `receive(name, type)`, `delete(name, type)` | Names as typed (`'L1'`) or as listed (`'L₁'`) |
 | `sendApp(file, { onProgress })` | Sends the Flash application of a `.8ek`, as `parseAppFile` returned it |

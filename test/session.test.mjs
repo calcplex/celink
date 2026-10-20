@@ -236,7 +236,40 @@ test('several delays before one reply are all waited out, where libticalcs takes
   noViolations(sim);
 });
 
-test('the reply\'s timeout bounds a run of delays', async () => {
-  const { link: bounded } = await connect({ delays: { 0x0008: Array(20).fill(100000) } }, { timeout: 300 });
+test('the busy timeout bounds a run of delays', async () => {
+  const { link: bounded } = await connect({ delays: { 0x0008: Array(20).fill(100000) } }, { timeout: 300, busyTimeout: 300 });
   await assert.rejects(bounded.info(), { code: 'TIMEOUT', message: /kept asking for more time/ });
+});
+
+// A CE that must defragment its archive answers an archived Request to Send
+// with a delay, then is silent until it is done (observed on hardware: 26 s).
+test('a defragment longer than the timeout is waited out, and onBusy says so once', { timeout: 10000 }, async () => {
+  const { sim, link } = await connect({ defragMs: 2600 }, { timeout: 500, busyTimeout: 5000 });
+  const e = makeEntry({ name: 'BIGGC', type: TYPE.APPVAR, body: patterned(3000), archived: true });
+  let busy = 0;
+  await link.send(e, { archive: true, onBusy: () => { busy++; } });
+  assert.equal(busy, 1);
+  const got = sim.get('BIGGC', TYPE.APPVAR);
+  assert.deepEqual(got.data, e.data);
+  assert.equal(got.archived, true);
+  noViolations(sim);
+});
+
+test('a short defragment does not call onBusy', async () => {
+  const { sim, link } = await connect({ defragMs: 300 }, { timeout: 500, busyTimeout: 5000 });
+  let busy = 0;
+  await link.send(makeEntry({ name: 'GCQUICK', type: TYPE.APPVAR, body: patterned(500), archived: true }), { archive: true, onBusy: () => { busy++; } });
+  assert.equal(busy, 0);
+  noViolations(sim);
+});
+
+test('the busy timeout bounds a defragment', { timeout: 10000 }, async () => {
+  const { link } = await connect({ defragMs: 1500 }, { timeout: 300, busyTimeout: 700 });
+  await assert.rejects(link.send(makeEntry({ name: 'GCSTUCK', type: TYPE.APPVAR, body: patterned(500), archived: true }), { archive: true }), { code: 'TIMEOUT' });
+});
+
+test('without a delay, silence is still bounded by the timeout', async () => {
+  const { sim, link } = await connect({}, { timeout: 300, busyTimeout: 5000 });
+  sim.freeze = true;
+  await assert.rejects(link.send(makeEntry({ name: 'HUNG', type: TYPE.APPVAR, body: patterned(500), archived: true }), { archive: true }), { code: 'TIMEOUT' });
 });
