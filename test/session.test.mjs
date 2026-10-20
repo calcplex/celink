@@ -163,6 +163,37 @@ test('a timeout clears both endpoints\' halts, closes the link, and it opens aga
   assert.equal((await link.info()).productName, 'TI-84 Plus CE');
 });
 
+test('damagedVat: a listing sends the RAM variables, then times out, and the calculator stays silent until replugged', async () => {
+  const vars = [
+    { name: 'RAMONE', type: TYPE.PROGRAM, data: patterned(12), archived: false },
+    { name: 'ARCHED', type: TYPE.APPVAR, data: patterned(12), archived: true },
+  ];
+  const { sim, link } = await connect({ vars, damagedVat: true }, { timeout: 80, streamTimeout: 200 });
+  await assert.rejects(link.list(), { code: 'TIMEOUT' });
+  const rows = sim.log.filter(p => p.dir === 'in' && p.bytes[4] === 4 && p.bytes.length > 11 && p.bytes[9] === 0x00 && p.bytes[10] === 0x0A);
+  assert.equal(rows.length, 1, 'only the RAM variable was listed');
+  assert.equal(link.opened, false);
+  await link.open();
+  await assert.rejects(link.ready(), { code: 'TIMEOUT' }, 'reopening without a replug: still silent');
+  sim.replug();
+  await link.open();
+  await link.ready();
+  await assert.rejects(link.list(), { code: 'TIMEOUT' }, 'the damage outlasts a replug');
+  sim.replug();
+  sim.damagedVat = false; // a RAM reset
+  await link.open();
+  await link.ready();
+  assert.deepEqual((await link.list()).map(r => r.name).sort(), ['ARCHED', 'RAMONE']);
+  noViolations(sim);
+});
+
+test('damagedVat with nothing in RAM: the listing gets no row at all', async () => {
+  const vars = [{ name: 'ARCHED', type: TYPE.APPVAR, data: patterned(12), archived: true }];
+  const { sim, link } = await connect({ vars, damagedVat: true }, { timeout: 80, streamTimeout: 200 });
+  await assert.rejects(link.list(), { code: 'TIMEOUT' });
+  noViolations(sim);
+});
+
 test('a calculator that goes quiet while contents stream times out on the stream timeout', async () => {
   const { sim, link } = await connect({}, { streamTimeout: 80 });
   sim.intercept = type => type === VPKT.VAR_CNTS && (sim.freeze = true);

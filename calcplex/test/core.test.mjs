@@ -9,6 +9,7 @@ import {
   isChromeOS, isWindows, jbPromptChoice, launchesArchived, linkDead, linkReason, needsAsm, officialFiles, openDetail,
   pageErrorText, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable,
   sameVariable, startHint, stepTracker, unknownRefusal,
+  deleteParams, STALL_TEXT, STALL_RESET_TEXT, STALL_HOOK_TEXT, stalledListing, stallText, stallDetail, stallLog,
 } from '../core.mjs';
 import { CELinkError } from '../../celink.mjs';
 import { TYPE } from '../../tifiles.mjs';
@@ -286,7 +287,46 @@ test('openDetail: <step>_<cause> for OPEN_FAILED, no_reply for TIMEOUT, never br
   assert.equal(openDetail({ code: 'OPEN_FAILED', step: 'open', cause: 'thrown text' }), 'open_other');
   assert.equal(openDetail({ code: 'TIMEOUT' }), 'no_reply');
   assert.equal(openDetail({ code: 'NO_DEVICE_SELECTED' }), undefined);
-  assert.equal(openDetail(null), undefined);
+});
+
+test('openDetail: an `other` failure says what kind of error it was, from a fixed list, never its text', () => {
+  const kinds = [
+    [new CELinkError('NO_ENDPOINTS', 'no bulk IN/OUT endpoints'), 'code_no_endpoints'],
+    [new CELinkError('NOT_OPEN', 'link is not open'), 'code_not_open'],
+    [{ code: 'BAD_HASH_X' }, 'code_bad_hash_x'],
+    [new TypeError("Cannot read properties of undefined (reading 'transferIn')"), 'type_error'],
+    [new RangeError('Offset is outside the bounds of the DataView'), 'range_error'],
+    [new Error('anything at all'), 'error'],
+    [new DOMException('Must be handling a user gesture to show a permission request.', 'NotAllowedError'), 'not_allowed_error'],
+    [new DOMException('The device was disconnected.', 'NotSupportedError'), 'not_supported_error'],
+    [Object.assign(new Error('x'), { name: 'Jane Smith' }), 'other_error'],
+    [{ name: 'constructor' }, 'other_error'],
+    [{ name: 'toString' }, 'other_error'],
+    // A code that is not one of ours (text, a number, too long) is not passed on either.
+    [{ code: 'jane@example.com', name: 'TypeError' }, 'type_error'],
+    [{ code: '<script>' }, 'other_error'],
+    [new DOMException('x', 'SecurityError'), 'security_error'],
+    [{ code: 18, name: 'SecurityError' }, 'security_error'],
+    [{ code: 'A_VERY_LONG_CODE_PAST_THE_LIMIT' }, 'other_error'],
+    [{}, 'other_error'],
+    ['Access denied for jane@example.com', 'thrown'],
+    [42, 'thrown'],
+    [null, 'thrown'],
+    [undefined, 'thrown'],
+  ];
+  const vocabulary = /^(code_[a-z][a-z0-9_]{1,23}|[a-z_]+_error|error|thrown)$/;
+  for (const [err, detail] of kinds) {
+    assert.equal(failReason(err), 'other', String(err?.message ?? err));
+    assert.equal(openDetail(err), detail, String(err?.message ?? err));
+    assert.match(detail, vocabulary);
+    assert.ok(detail.length <= 40);
+  }
+  // Errors with a reason of their own keep their old detail, or none.
+  assert.equal(openDetail(new CELinkError('TI84_EVO', 'That is a TI-84 Evo')), undefined);
+  assert.equal(openDetail(new CELinkError('DISCONNECTED', 'gone')), undefined);
+  assert.equal(openDetail(new CELinkError('CALC_ERROR', 'refused', { calcError: 0x0011 })), undefined);
+  assert.equal(openDetail(Object.assign(new Error('x'), { name: 'NotFoundError' })), undefined);
+  assert.equal(openDetail({ code: 'NO_RAM_SPACE' }), undefined);
 });
 
 test('refusedAt: the operation and step a calculator refused, and nothing for other errors', () => {
@@ -421,4 +461,98 @@ test('page error text: a running program wins on every page, the page words by r
   const ram = refusal('NO_RAM_SPACE', 'Not enough RAM. Delete or archive a few programs, then try again.', { partial: ['clibs'] });
   assert.equal(pageErrorText(ram, { page: 'hub' }), 'Not enough RAM. Delete or archive a few programs, then try again.');
   assert.equal(pageErrorText(running, { page: 'hub' }), RUNNING_TEXT, 'no table needed');
+});
+
+const stall = (extra = {}) => Object.assign(new CELinkError('TIMEOUT', 'The calculator did not answer within 3000 ms (waiting for the calculator).'), { listing: true }, extra);
+const fakeStorage = () => {
+  const m = new Map();
+  return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), m };
+};
+
+test('stalledListing: a listing timeout with no defragment before it, nothing else', () => {
+  assert.equal(stalledListing(stall()), true);
+  assert.equal(stalledListing(stall({ defrag: true })), false, 'a defragment is the defrag wait\'s case');
+  assert.equal(stalledListing(new CELinkError('TIMEOUT', 'x')), false, 'a timeout outside a listing');
+  assert.equal(stalledListing(Object.assign(new CELinkError('DISCONNECTED', 'x'), { listing: true })), false);
+  assert.equal(stalledListing(null), false);
+  assert.equal(stalledListing('TIMEOUT'), false);
+});
+
+test('stallLog: the first stall, the second, and a connect timeout after one; counted in sessionStorage', () => {
+  const store = fakeStorage();
+  const log = stallLog(() => store);
+  const plain = new CELinkError('TIMEOUT', 'x');
+  assert.equal(log.note(plain, { connecting: true }).afterStall, undefined, 'no stall yet: an ordinary timeout');
+  const first = log.note(stall());
+  assert.equal(first.stalls, 1);
+  assert.equal(store.m.get('ce-stalls'), '1');
+  assert.equal(log.note(new CELinkError('TIMEOUT', 'x'), { connecting: true }).afterStall, true);
+  assert.equal(log.note(new CELinkError('TIMEOUT', 'x')).afterStall, undefined, 'only at connect');
+  assert.equal(log.note(Object.assign(new CELinkError('TIMEOUT', 'x'), { defrag: true }), { connecting: true }).afterStall, undefined);
+  assert.equal(log.note(new CELinkError('DISCONNECTED', 'x'), { connecting: true }).afterStall, undefined);
+  assert.equal(log.note(first).stalls, 1, 'an error is noted once');
+  assert.equal(log.count(), 1);
+  // A reload in the same tab: a new log over the same storage.
+  const again = stallLog(() => store).note(stall());
+  assert.equal(again.stalls, 2);
+});
+
+test('stallLog: storage that throws or is missing counts for the page load only', () => {
+  const throwing = stallLog(() => { throw new DOMException('denied', 'SecurityError'); });
+  assert.equal(throwing.note(stall()).stalls, 1);
+  assert.equal(throwing.note(stall()).stalls, 2);
+  const broken = stallLog(() => ({ getItem: () => { throw new Error('x'); }, setItem: () => { throw new Error('x'); } }));
+  assert.equal(broken.note(stall()).stalls, 1);
+  assert.equal(broken.note(stall()).stalls, 2);
+  const none = stallLog(() => undefined);
+  assert.equal(none.note(stall()).stalls, 1);
+  assert.equal(none.note(new CELinkError('TIMEOUT', 'x'), { connecting: true }).afterStall, true);
+  const junk = fakeStorage();
+  junk.setItem('ce-stalls', 'NaN');
+  assert.equal(stallLog(() => junk).note(stall()).stalls, 1);
+});
+
+test('stallText: off and on first, a RAM reset the second time, AsmHook2 only on 5.8.5 games pages', () => {
+  assert.equal(stallText(stall({ stalls: 1 }), { page: 'game', route: 'v3' }), STALL_TEXT);
+  assert.equal(stallText(new CELinkError('TIMEOUT', 'x'), { page: 'game' }), undefined);
+  assert.equal(stallText(Object.assign(new CELinkError('TIMEOUT', 'x'), { afterStall: true }), { page: 'hub' }), STALL_TEXT);
+  assert.equal(stallText(stall({ stalls: 2, route: 'v3' }), { page: 'game' }), `${STALL_RESET_TEXT} ${STALL_HOOK_TEXT}`);
+  assert.equal(stallText(stall({ stalls: 3 }), { page: 'hub', route: 'v3' }), `${STALL_RESET_TEXT} ${STALL_HOOK_TEXT}`, 'the page\'s route when the error has none');
+  assert.equal(stallText(stall({ stalls: 2, route: 'v3' }), { page: 'math' }), STALL_RESET_TEXT, 'TI-Basic needs no hook');
+  assert.equal(stallText(stall({ stalls: 2, route: 'v21' }), { page: 'game' }), STALL_RESET_TEXT);
+  assert.equal(stallText(stall({ stalls: 2 }), { page: 'game' }), STALL_RESET_TEXT, 'no route known');
+  assert.equal(stallText({ code: 'DISCONNECTED', stalls: 2 }), undefined);
+  // Plain copy: the keys spelled as on the keypad, digits for menu choices.
+  for (const t of [STALL_TEXT, STALL_RESET_TEXT, STALL_HOOK_TEXT]) {
+    assert.doesNotMatch(t, /[\u2013\u2014]|\bfree\b|don't worry|nothing (is )?wrong/i);
+  }
+  assert.match(STALL_TEXT, /\(2nd, on, then on\)/);
+  assert.match(STALL_RESET_TEXT, /2nd, \+, 7:\u00a0Reset, 1:\u00a0All\u00a0RAM, 2:\u00a0Reset/);
+  assert.equal(STALL_RESET_TEXT.replace(/\s+/g, ' ').includes('2nd, +, 7: Reset, 1: All RAM, 2: Reset'), true, 'the same words with plain spaces');
+  assert.match(STALL_RESET_TEXT, /deletes programs that aren't archived/);
+  assert.ok(`${STALL_RESET_TEXT} ${STALL_HOOK_TEXT}`.length <= 300);
+});
+
+test('stallDetail and openDetail: stalled_list, stalled_list_again, no_reply_after_stall, else no_reply', () => {
+  assert.equal(openDetail(stall({ stalls: 1 })), 'stalled_list');
+  assert.equal(openDetail(stall({ stalls: 2 })), 'stalled_list_again');
+  assert.equal(openDetail(stall({ stalls: 5 })), 'stalled_list_again');
+  assert.equal(openDetail(Object.assign(new CELinkError('TIMEOUT', 'x'), { afterStall: true })), 'no_reply_after_stall');
+  assert.equal(openDetail(stall()), 'no_reply', 'not noted: an ordinary timeout');
+  assert.equal(stallDetail(new CELinkError('TIMEOUT', 'x')), undefined);
+  assert.equal(stallDetail({ code: 'OPEN_FAILED', stalls: 1 }), undefined);
+});
+
+test('deleteParams: a delete whose listing stalled carries open_detail', () => {
+  const base = { game: 'CHECKERS', page: 'hub', route: 'v3', outcome: 'failed' };
+  assert.equal(deleteParams({ ...base, err: stall({ stalls: 1 }) }).open_detail, 'stalled_list');
+  assert.equal(deleteParams({ ...base, err: new CELinkError('TIMEOUT', 'x') }).open_detail, undefined);
+});
+
+test('pageErrorText: the page\'s stall words replace the stopped-responding words for a stalled listing', () => {
+  const own = err => ({ timeout: stallText(err, { page: 'game', route: 'v3' }) ?? 'LOST' });
+  const e1 = stall({ stalls: 1 });
+  assert.equal(pageErrorText(e1, { page: 'game', own: own(e1) }), STALL_TEXT);
+  const e0 = new CELinkError('TIMEOUT', 'x');
+  assert.equal(pageErrorText(e0, { page: 'game', own: own(e0) }), 'LOST');
 });

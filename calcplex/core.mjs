@@ -604,6 +604,8 @@ export function platformName(nav) {
 //   page         ce_key_help, the first time a page shows the prgm key's picture: hub | game |
 //                math | installer; ce_delete and ce_delete_reason: hub | game | math;
 //                ce_rate: hub | game | math
+//   open_detail  ce_connect_fail: openDetail; ce_send_fail and a failed ce_delete, only for a
+//                stalled listing: stalled_list | stalled_list_again (stallDetail)
 
 export const PREVIEW_HOST = typeof location !== 'undefined' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
@@ -845,7 +847,7 @@ export function startReporter(send = track) {
 export function deleteParams({ game, page, route, outcome, bytes = 0, err, lastReason }) {
   const params = { game, page, route, outcome };
   if (outcome === 'deleted') params.freed_kb = Math.ceil(bytes / 1024);
-  if (outcome === 'failed') Object.assign(params, { reason: failReason(err) }, refusedAt(err));
+  if (outcome === 'failed') Object.assign(params, { reason: failReason(err) }, refusedAt(err), stallDetail(err) ? { open_detail: stallDetail(err) } : {});
   if (lastReason) params.last_reason = lastReason;
   return params;
 }
@@ -1291,15 +1293,116 @@ export function linkReason(err) {
 const OPEN_STEPS = ['open', 'config', 'claim'];
 const OPEN_CAUSES = { SecurityError: 'security', NetworkError: 'network', InvalidStateError: 'state', NotFoundError: 'notfound', AbortError: 'abort' };
 
+// The error names an `other` failure may carry, as open_detail words. Any
+// other name is other_error: a name is never passed on as it came.
+const OTHER_NAMES = {
+  Error: 'error', TypeError: 'type_error', RangeError: 'range_error', ReferenceError: 'reference_error', SyntaxError: 'syntax_error',
+  SecurityError: 'security_error', NetworkError: 'network_error', InvalidStateError: 'state_error', AbortError: 'abort_error',
+  NotAllowedError: 'not_allowed_error', NotSupportedError: 'not_supported_error', OperationError: 'operation_error', DataError: 'data_error',
+  TimeoutError: 'timeout_error', InvalidAccessError: 'access_error', QuotaExceededError: 'quota_error', UnknownError: 'unknown_error',
+};
+// The library's and the pages' own codes are upper-case words like NO_ENDPOINTS.
+const CODE_WORD = /^[A-Z][A-Z0-9_]{1,23}$/;
+
 /**
  * ce_connect_fail's `open_detail`: where a connect died. OPEN_FAILED gives
  * `<step>_<cause>` (a Chromebook policy block reads open_security, a held
- * interface claim_network); a TIMEOUT means the calculator never answered.
+ * interface claim_network); a TIMEOUT means the calculator never answered
+ * (no_reply), or is a stalled listing (stallDetail).
+ * An error whose reason is `other` gives what kind of error it was, never its
+ * message: `code_<code>` for an error code (code_no_endpoints), else its name
+ * from OTHER_NAMES (type_error), other_error for any other name, and thrown
+ * for a value that is not an error object at all.
  */
 export function openDetail(err) {
-  if (err?.code === 'TIMEOUT') return 'no_reply';
+  if (err?.code === 'TIMEOUT') return stallDetail(err) ?? 'no_reply';
+  if (failReason(err) === 'other') {
+    if (err === null || typeof err !== 'object') return 'thrown';
+    if (typeof err.code === 'string' && CODE_WORD.test(err.code)) return `code_${err.code.toLowerCase()}`;
+    return Object.hasOwn(OTHER_NAMES, err.name) ? OTHER_NAMES[err.name] : 'other_error';
+  }
   if (err?.code !== 'OPEN_FAILED') return undefined;
   const step = OPEN_STEPS.includes(err.step) ? err.step : 'other';
   const cause = Object.hasOwn(OPEN_CAUSES, err.cause?.name) ? OPEN_CAUSES[err.cause.name] : 'other';
   return `${step}_${cause}`;
+}
+
+/**
+ * A listing the calculator stopped answering part way through, with no
+ * defragment before it (readyEach marks a listing's timeout `listing`).
+ * Observed on hardware (OS 5.8.5): a damaged variable entry in RAM made every
+ * listing go silent after the RAM variables, and the calculator's USB then
+ * stayed silent until it was turned off and on. Its own Mem Management
+ * stopped with ERROR: MEMORY near the entry, and only a RAM reset (All RAM)
+ * cured it. One timeout is more often a cable or a calculator gone to sleep,
+ * so a reset is only asked for the second time (stallText).
+ */
+export function stalledListing(err) {
+  return err?.code === 'TIMEOUT' && !!err.listing && !err.defrag;
+}
+
+export const STALL_TEXT = 'The calculator stopped responding. Unplug it, turn it off and back on (2nd, on, then on), plug it back in, and try again.';
+// No-break spaces keep each menu choice on one line ("1: All RAM" never splits).
+export const STALL_RESET_TEXT = "The calculator stopped responding again. Reset its RAM to fix it: unplug it, then press 2nd, +, 7:\u00a0Reset, 1:\u00a0All\u00a0RAM, 2:\u00a0Reset. This deletes programs that aren't archived. Then plug it back in and try again.";
+// A RAM reset removes AsmHook2's hook, which games on 5.8.5 start through.
+export const STALL_HOOK_TEXT = 'Before you start a game, press apps and open AsmHook2.';
+
+/**
+ * What a CE page says for a timeout after a stalled listing (stallLog's
+ * note), or undefined for any other error: the first stall, and a timeout
+ * at connect after one (the calculator's USB still silent), turn it off and
+ * on; a second stall resets RAM, and on route v3 outside the math page opens
+ * AsmHook2 again. `route` is used when the error carries none.
+ */
+export function stallText(err, { page, route } = {}) {
+  if (err?.code !== 'TIMEOUT') return undefined;
+  if (err.stalls > 1) return (err.route ?? route) === 'v3' && page !== 'math' ? `${STALL_RESET_TEXT} ${STALL_HOOK_TEXT}` : STALL_RESET_TEXT;
+  return err.stalls || err.afterStall ? STALL_TEXT : undefined;
+}
+
+/**
+ * `open_detail` for a timeout stallLog noted: stalled_list (the first stalled
+ * listing in this tab), stalled_list_again (a later one: the RAM reset was
+ * asked for), no_reply_after_stall (a connect that timed out after one).
+ * Undefined otherwise.
+ */
+export function stallDetail(err) {
+  if (err?.code !== 'TIMEOUT') return undefined;
+  if (err.stalls) return err.stalls > 1 ? 'stalled_list_again' : 'stalled_list';
+  return err.afterStall ? 'no_reply_after_stall' : undefined;
+}
+
+/**
+ * Stalled listings in this tab, kept in sessionStorage so a reload after
+ * turning the calculator off and on still counts the first. `storage` returns
+ * the Storage to use; when it is missing or throws, the count lives in this
+ * page load only. note(err) marks a stalled listing with `stalls`, its number
+ * in this tab; with `connecting`, a timeout at connect after a stall gets
+ * `afterStall`. It returns `err`, and notes an error once.
+ */
+export function stallLog(storage = () => globalThis.sessionStorage) {
+  const KEY = 'ce-stalls';
+  let mem = 0;
+  const count = () => {
+    try {
+      const n = Number(storage()?.getItem(KEY));
+      return Number.isInteger(n) && n > mem ? n : mem;
+    } catch {
+      return mem;
+    }
+  };
+  return {
+    count,
+    note(err, { connecting = false } = {}) {
+      if (err?.stalls || err?.afterStall) return err; // noted already
+      if (stalledListing(err)) {
+        mem = count() + 1;
+        try { storage()?.setItem(KEY, String(mem)); } catch { /* counted for this page load */ }
+        err.stalls = mem;
+      } else if (connecting && err?.code === 'TIMEOUT' && !err.defrag && count()) {
+        err.afterStall = true;
+      }
+      return err;
+    },
+  };
 }

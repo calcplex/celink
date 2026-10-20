@@ -104,7 +104,9 @@ export async function pickCalculator({ usb = globalThis.navigator?.usb } = {}) {
  * `link` with ready() run before each exchange, as it was on every hardware
  * run. That a CE keeps one allocation and mode through a whole job is not
  * verified. A refusal from ready() names the exchange it was readying in
- * `readying`, so an app send's refusal reads in the app's terms.
+ * `readying`, so an app send's refusal reads in the app's terms. A listing
+ * that times out after ready() answered carries `listing: true`: a calculator
+ * that goes silent part way through its own listing (core's stalledListing).
  */
 export function readyEach(link) {
   const readied = op => async (...args) => {
@@ -114,7 +116,13 @@ export function readyEach(link) {
       if (err?.code === 'CALC_ERROR') err.readying = op;
       throw err;
     }
-    return link[op](...args);
+    if (op !== 'list') return link[op](...args);
+    try {
+      return await link.list(...args);
+    } catch (err) {
+      if (err?.code === 'TIMEOUT') err.listing = true;
+      throw err;
+    }
   };
   return {
     info: readied('info'), list: readied('list'), send: readied('send'),
@@ -332,12 +340,17 @@ export function ownedAfterDelete(owned, r) {
  * error during a read means the link is gone, and is thrown. With `own`
  * (known versions, as above), `owned` is ownedRows' answer, one read per
  * size match; without it nothing more is read and `owned` is []. Free RAM
- * read as 0 is read again after the listing (freeRamAgain).
+ * read as 0 is read again after the listing (freeRamAgain). A listing that
+ * times out (readyEach's `listing`) carries the calculator's `route`.
  */
 export async function inspect(openLink, { own = [] } = {}) {
   const link = readyEach(openLink);
   const first = await identify(link);
-  const rows = await link.list();
+  const rows = await link.list().catch(err => {
+    // The page words a listing that went silent by route.
+    if (err?.listing) err.route = first.route;
+    throw err;
+  });
   const calc = await freeRamAgain(link, first);
   const tools = [];
   for (const j of JAILBREAKS) {

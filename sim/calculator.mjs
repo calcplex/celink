@@ -116,6 +116,9 @@ export class SimulatedCalculator {
                                 // observed on hardware (OS 5.8.5); settable at any time
     emptyOnFull = false,        // an archived send refused for space leaves an empty variable in RAM
                                 // under its name, as observed in an emulator running OS 5.8.5
+    damagedVat = false,         // a damaged variable entry in RAM: a listing sends the RAM variables,
+                                // then the calculator stops answering until replugged, as observed on
+                                // hardware (OS 5.8.5); settable at any time (false = a RAM reset)
     running = false,            // a program running on the calculator; settable at any time
     leftovers = [],             // raw packets { type, data } sent before the answer to the next Buffer Size
                                 // Request, as an earlier exchange might leave; never observed on hardware
@@ -153,6 +156,7 @@ export class SimulatedCalculator {
     this.defragMs = defragMs;
     this.refuse = refuse && { times: Infinity, ...refuse };
     this.emptyOnFull = emptyOnFull;
+    this.damagedVat = damagedVat;
     this.running = running;
     this.leftovers = [...leftovers];
     this.vars = new Map();
@@ -303,6 +307,7 @@ export class SimulatedCalculator {
     this._queue = [];           // our raw packets not yet read by the host
     this._current = null;       // the raw packet being read: { bytes, off, needsAck, delayMs }
     this._awaitingAck = null;   // the raw packet the host has read and must acknowledge
+    this._stallPending = false; // damagedVat: stop answering once the listed RAM variables are acknowledged
   }
 
   _refusal(step) {
@@ -388,6 +393,10 @@ export class SimulatedCalculator {
         this._awaitingAck = null;
         if (acked.delayMs != null) this._delayUntil = performance.now() + acked.delayMs;
         this._release();
+        if (this._stallPending && !this._current && !this._awaitingAck && !this._queue.length) {
+          this._stallPending = false;
+          this.freeze = true;
+        }
         return true;
       }
       default:
@@ -651,6 +660,14 @@ export class SimulatedCalculator {
     const ids = Array.from({ length: r.u32() }, () => r.u16());
     const tail = hex(r.take(r.left));
     if (tail !== '00010001000101') return this._bad(`Directory request tail is ${tail}, expected 00010001000101.`);
+    if (this.damagedVat) {
+      // The RAM variables, then silence: no archived variable, no app, no end.
+      const ram = [...this.vars.values()].filter(v => !v.archived);
+      for (const v of ram) this.queueVirtual(0x000A, this._header(v, ids));
+      if (ram.length) this._stallPending = true;
+      else this.freeze = true;
+      return;
+    }
     for (const v of this.vars.values()) this.queueVirtual(0x000A, this._header(v, ids));
     this.queueVirtual(0xDD00, []);
   }
