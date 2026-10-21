@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 CalcPlex. Part of celink: https://github.com/calcplex/celink
 //
-// The guided jailbreak installer at /ti84plusce-jailbreak-installer/, one
-// task per screen. The checks and transfers are core.mjs and transport.mjs;
+// The guided jailbreak installer at the top of /ti84plusce-jailbreak-tutorial/,
+// one task per screen, and the manual installation under it (mountGuide). The checks and transfers are core.mjs and transport.mjs;
 // this is the wizard around them. The arTIfiCE files come from this site and
 // are checked against their pins before they reach USB; if that fails, the
 // student picks the author's download instead.
@@ -18,11 +18,13 @@ import { CELinkError } from '../celink.mjs';
 
 const AUTHOR = 'https://yvantt.github.io/arTIfiCE/';
 const RELEASE = tag => `https://github.com/YvanTT/arTIfiCE/releases/tag/${tag}`;
-// "Manual installation": the site's written tutorial or the author's guide,
-// whichever the page generator put on #cec-shell.
-const WRITTEN = document.getElementById('cec-shell')?.dataset.writtenSteps || '/ti84plusce-jailbreak-tutorial/';
+// "Manual installation": the steps under the wizard on the same page, as the
+// page generator put them on #cec-shell.
+const WRITTEN = document.getElementById('cec-shell')?.dataset.writtenSteps || '#manual';
 const writtenAttrs = () => (/^https?:/.test(WRITTEN) ? ' target="_blank" rel="noopener nofollow"' : '');
 const GAMES = '/downloads/ti84plusce/games/';
+// The connection picture, served beside this module.
+const ART = '/ti84plusce-jailbreak-tutorial/connection.svg';
 // The game the Play screen sends: one assembly program, no C libraries.
 // `name` is the variable inside the file.
 const GAME = { id: 'cec-snake', label: 'Snake', file: '/downloads/ce/SnakeCE.8xg', name: 'SNAKE' };
@@ -34,7 +36,7 @@ const ARCHIVING = 'https://education.ti.com/en/customer-support/knowledge-base/t
 const GAME_WALK = {
   alt: 'Starting a game on a calculator: the prgm menu, the name on the home screen, then the game running',
   steps: [
-    'Press <kbd>prgm</kbd>, arrow to your game, then press <kbd>enter</kbd>. On a Python edition, choose TI-Basic first.',
+    'Press <kbd>prgm</kbd>, arrow to your game, then press <kbd>enter</kbd>. If your calculator\'s model name ends in Python, choose TI-Basic first.',
     'Its name is on the home screen. Press <kbd>enter</kbd> again.',
   ],
   done: 'The game starts.',
@@ -46,7 +48,7 @@ const WALKS = {
       'Press <kbd>2nd</kbd>, then <kbd>+</kbd>.',
       'Press <kbd>7</kbd> for Reset.',
       'Press <kbd>1</kbd> for All RAM.',
-      'Press <kbd>2</kbd> for Reset.',
+      'To confirm, press <kbd>2</kbd> for Reset (1 is No).',
     ],
     done: 'The RAM is clear.',
   },
@@ -85,7 +87,7 @@ const WALKS = {
   'ce-jb-v21-run': {
     alt: 'Running arTIfiCE on a calculator: the prgm menu, prgmA on the home screen, arTIfiCE\'s list of games, then the game running',
     steps: [
-      'Press <kbd>prgm</kbd>, then press <kbd>enter</kbd> on A. On a Python edition, choose TI-Basic first.',
+      'Press <kbd>prgm</kbd>, then press <kbd>enter</kbd> on A. If your calculator\'s model name ends in Python, choose TI-Basic first.',
       'prgmA is on the home screen. Press <kbd>enter</kbd> again.',
       'arTIfiCE lists your games. Arrow to one and press <kbd>enter</kbd>.',
     ],
@@ -121,14 +123,22 @@ const walk = name => {
 };
 
 // Back and Next step by one, a list item jumps to its step, a click on the
-// picture advances. Frames are preloaded so stepping never flashes. `_sync`
-// restores Back and Next after work() has re-enabled every button.
-function mountWalks() {
-  root().querySelectorAll('.cec-walk').forEach(el => {
+// picture advances. Frames are preloaded so stepping never flashes: at once in
+// the wizard, and in the manual installation (`lazy`, seven walks, most in
+// routes nobody opened) the first time a pointer or focus reaches the walk.
+// `_sync` restores Back and Next after work() has re-enabled every button.
+function mountWalks(scope = root(), { lazy = false } = {}) {
+  scope.querySelectorAll('.cec-walk').forEach(el => {
     const name = el.dataset.walk;
     const w = WALKS[name];
     const n = walkEntries(w).length;
-    for (let i = 0; i < n; i++) new Image().src = frameUrl(name, i);
+    const preload = () => {
+      if (el._preloaded) return;
+      el._preloaded = true;
+      for (let i = 0; i < n; i++) new Image().src = frameUrl(name, i);
+    };
+    if (lazy) ['pointerenter', 'focusin', 'touchstart'].forEach(type => el.addEventListener(type, preload, { once: true, passive: true }));
+    else preload();
     const img = el.querySelector('.cec-walk-pic img');
     const items = el.querySelectorAll('.cec-walk-steps li');
     const count = el.querySelector('.cec-walk-count');
@@ -170,7 +180,7 @@ const STEPS = ['Connect', 'Check', 'Install', 'Play'];
 // Where the words are ours. Refusals read through refusalText; anything else
 // shows the error's own message.
 const OUTCOME_TEXT = {
-  no_device: 'No calculator was picked. Choose one from the browser list when you are ready.',
+  no_device: 'No calculator was picked. Press the button again and choose it from the list.',
   open_failed: 'Another program is using the calculator. Close TI Connect CE and anything else that talks to it, unplug the calculator, plug it back in, then press Connect calculator again.',
   link_lost: 'The calculator stopped answering. If a game is running on it, quit the game and connect again. Otherwise, unplug the USB cable, plug it back in, then choose Start over.',
   low_battery: 'Charge the calculator before installing. Sending an app needs a battery that is not low.',
@@ -283,6 +293,7 @@ const state = {
   lastReason: '',   // the last reason shown, for the report control
   reported: {},     // report choice -> true, so one page load counts each once
   v21: null,        // arTIfiCE v2.1 then Snake; a retry resumes at the one that failed
+  deadEnd: false,   // the screen on show ends the install (its footer shows Manual installation)
 };
 
 function root() { return $('#cec'); }
@@ -296,13 +307,24 @@ function progress() {
   }).join('')}</ol></nav>`;
 }
 
+// The footer's Manual installation link shows only where doing it by hand is
+// the real way out (the section is right under the wizard): on a screen that ends the install, and after a failure. Not after
+// a failure the manual installation can't fix either: an Evo, a calculator
+// that isn't a CE, a low battery, another tab busy with it, a program left
+// running. A version arTIfiCE doesn't cover has no manual route either.
+const NO_MANUAL = ['evo', 'unsupported', 'wrong_model', 'low_battery', 'tab_busy'];
+function showManual(on) {
+  const a = root()?.querySelector('.cec-manual');
+  if (a) a.hidden = !on;
+}
+
 // There is no Back: Start over (a reload) is the one way backwards.
 function foot() {
   return `<div class="cec-report" id="cec-report" hidden></div>
   <div class="cec-foot">
     <button type="button" id="cec-restart"${state.busy ? ' disabled' : ''}>Start over</button>
     <button type="button" id="cec-report-open"${state.busy ? ' disabled' : ''} aria-expanded="false" aria-controls="cec-report">Didn't work?</button>
-    <a class="cec-manual" href="${WRITTEN}"${writtenAttrs()}>Manual installation</a>
+    <a class="cec-manual" href="${manualHref()}"${writtenAttrs()}${state.deadEnd ? '' : ' hidden'}>Manual installation</a>
   </div>`;
 }
 
@@ -318,12 +340,46 @@ let keyHelp = null;
 // A key (or the prgm key help) and the punctuation after it stay on one line.
 const keepKeyPunctuation = html => html.replace(/(?:<kbd>[^<]*<\/kbd>|<button type="button" class="cec-keyhelp"[^>]*>(?:[^<]|<(?!\/button>))*<\/button>)[.,:;)]+/g, m => `<span class="cec-nobr">${m}</span>`);
 
-function paint(body, step, screen) {
+// Smooth, unless the reader's system asks for less motion: then it jumps.
+const scrollBehavior = () => (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth');
+
+// The site's bar (site.js) is fixed once the page has scrolled past it, and
+// then covers the top of the window whenever it has slid back in.
+function barBottom() {
+  const bar = document.getElementById('sticky-navigation');
+  if (!bar || getComputedStyle(bar).position !== 'fixed') return 0;
+  return Math.max(0, bar.getBoundingClientRect().bottom);
+}
+
+// Screens differ a lot in height, so a button pressed at the bottom of a tall
+// one could leave the next screen's start above the window, or its button
+// below it. After
+// a screen change, if the card's top is hidden or the new screen's first
+// button is off-screen, the card's top comes to just under the site's bar
+// (its scroll-margin-top). When both are in view, nothing moves. Focus stays
+// where paint() put it.
+function anchorView(card) {
+  const top = card.getBoundingClientRect().top;
+  const bar = barBottom();
+  const bottom = window.innerHeight || document.documentElement.clientHeight;
+  const main = [...card.querySelectorAll('.cec-actions .wp-block-button__link')].find(b => b.getClientRects().length);
+  const r = main?.getBoundingClientRect();
+  if (top >= bar && top < bottom && (!r || (r.top >= bar && r.bottom <= bottom))) return;
+  card.scrollIntoView({ block: 'start', behavior: scrollBehavior() });
+}
+
+// The progress row is the card's first line, so it reads as part of the tool.
+// `deadEnd`: this screen ends the install. The
+// first paint (the page loading) never scrolls; every later one is a screen
+// change and anchors the view.
+let painted = false;
+function paint(body, step, screen, { deadEnd = false } = {}) {
   trackStep(screen);
   state.gate = null;
   state.afterWork = null;
   state.step = step;
-  root().innerHTML = `${progress()}<section class="cec-card">${keepKeyPunctuation(body)}
+  state.deadEnd = deadEnd;
+  root().innerHTML = `<section class="cec-card">${progress()}${keepKeyPunctuation(body)}
     <p class="cec-status" role="status" aria-live="polite" id="cec-status"></p>
     <div class="cec-error" role="alert" id="cec-error" hidden></div>
     ${foot()}</section>`;
@@ -341,6 +397,8 @@ function paint(body, step, screen) {
   mountWalks();
   const heading = root().querySelector('h2');
   if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
+  if (painted) anchorView(card);
+  painted = true;
   keyHelp?.refresh();
 }
 
@@ -365,9 +423,24 @@ const windowsKey = (err, reason) => (reason === 'open_failed' && openDetail(err)
 // A TI-84 Evo shares TI's vendor id, so it shows in the device list.
 const EVO = '/ti84evo-jailbreak/';
 const EVO_OUTCOME_HTML = `<p>That's a TI-84 Evo. This jailbreak is only for the TI-84 Plus CE, and there is no jailbreak for the Evo yet. <a href="${EVO}">What your Evo can run</a></p>`;
+// A school Chromebook's policy can stop the device list from opening at all:
+// the browser then reports no device picked (no_device), or the list failed
+// to open (`picker`, set where the picker is called). Either way the
+// Chromebook line goes with it.
 const CHROMEOS_OUTCOME_TEXT = {
   open_failed: "Couldn't connect. Close any other tab using the calculator, unplug it and plug it back in, then press Connect calculator again. Some school Chromebooks don't let websites use USB devices, so if it keeps failing, try a Windows or Mac computer.",
+  no_device: "No calculator was picked. Press the button again and choose it from the list. Some school Chromebooks don't let websites use USB devices, so if no list opens, try a Windows or Mac computer.",
+  picker: "Your browser couldn't open the list of devices. Some school Chromebooks don't let websites use USB devices, so try a Windows or Mac computer.",
 };
+// The Chrome OS text for an error: a failed device list has its own.
+const chromeosKey = (err, reason) => (err?.picker && reason !== 'no_device' ? 'picker' : reason);
+// Marks an error thrown by the browser's device list (before any calculator
+// was picked), so fail() can tell it from a cable that dropped later.
+const PICKER_CODES = ['NO_DEVICE_SELECTED', 'USB_ERROR'];
+function markPicker(err) {
+  if (err && typeof err === 'object' && PICKER_CODES.includes(err.code)) err.picker = true;
+  return err;
+}
 function say(text) { const el = $('#cec-status'); if (el) el.textContent = text || ''; }
 function fail(err) {
   const el = $('#cec-error');
@@ -383,11 +456,12 @@ function fail(err) {
     const go = el.querySelector('[data-go="install"]');
     if (go) go.onclick = () => { if (!state.busy) viewInstallTIConnect(); };
   } else {
-    el.textContent = (onChromeOS() && CHROMEOS_OUTCOME_TEXT[reason]) || OUTCOME_TEXT[reason]
+    el.textContent = (onChromeOS() && CHROMEOS_OUTCOME_TEXT[chromeosKey(err, reason)]) || OUTCOME_TEXT[reason]
       || (reason === 'timeout' ? timeoutText(err) : null)
       || (unknownRefusal(err) ? retryText(err.calcError) : null) || refusalText(err) || err?.message || String(err);
   }
   el.hidden = false;
+  showManual(state.deadEnd || !(programRunning(err) || NO_MANUAL.includes(reason)));
   say('');
 }
 
@@ -396,6 +470,7 @@ async function work(fn) {
   if (state.busy) return;
   state.busy = true;
   const el = $('#cec-error'); if (el) el.hidden = true;
+  showManual(state.deadEnd);
   root().querySelectorAll('button, input').forEach(b => { b.disabled = true; });
   try {
     await fn();
@@ -431,9 +506,9 @@ const onWindows = () => forceWindows || isWindows(navigator);
 const onChromeOS = () => forceChromeOS || isChromeOS(navigator);
 function viewWindowsCheck() {
   paint(`
-    <div class="cec-hero"><img src="/ti84plusce-jailbreak-installer/connection.svg" alt="" width="280" height="112"></div>
+    <div class="cec-hero"><img src="${ART}" alt="" width="280" height="112"></div>
     <h2>Is TI Connect CE installed on this computer?</h2>
-    <p class="cec-sub">On Windows, this page can only find your calculator once TI Connect CE, TI's own software, is installed.</p>
+    <p class="cec-sub">On Windows, we can only find your calculator once TI Connect CE, TI's software, is installed.</p>
     <div class="cec-actions cec-actions-pair">
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-have">Yes, it's installed</button></div>
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius is-secondary" id="cec-need">No, or I'm not sure</button></div>
@@ -449,7 +524,7 @@ function viewInstallTIConnect() {
     <div class="cec-do">
       <ol>
         <li><a href="${TICONNECT_URL}" target="_blank" rel="noopener nofollow">Download TI Connect CE from TI</a> and run the installer.</li>
-        <li>If you open TI Connect CE, <strong>close it</strong> before you carry on. This page can't reach the calculator while it's open.</li>
+        <li>If you open TI Connect CE, <strong>close it</strong> before you carry on. We can't reach the calculator while it's open.</li>
         <li>Come back to this tab.</li>
       </ol>
     </div>
@@ -463,28 +538,31 @@ function viewConnect() {
   const usb = !!navigator.usb;
   const win = onWindows();
   paint(`
-    <div class="cec-hero"><img src="/ti84plusce-jailbreak-installer/connection.svg" alt="" width="280" height="112"></div>
+    <div class="cec-hero"><img src="${ART}" alt="" width="280" height="112"></div>
     <h2>Connect your calculator</h2>
     <div class="cec-do">
       <ol>
         <li>Plug the CE into this computer with its charging cable and turn it on.</li>
         ${win
-          ? `<li><strong>Close TI Connect CE.</strong> This page can't reach the calculator while it's open.</li>`
-          : onChromeOS() ? '' : `<li>Quit TI Connect CE if it is open on your computer.</li>`}
+          ? `<li><strong>Close TI Connect CE.</strong> We can't reach the calculator while it's open.</li>`
+          : onChromeOS() ? '' : `<li>Quit TI Connect CE if it is open on your computer. We can't reach the calculator while it's open.</li>`}
       </ol>
     </div>
     <div class="cec-actions">
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-go"${usb ? '' : ' disabled'}>Connect calculator</button></div>
     </div>
-    <p class="cec-why">Different calculator versions need different jailbreaks. This page reads the version over the cable and picks the right one.</p>
-    ${usb ? '' : '<p class="cec-why">Direct USB needs Chrome or Edge on a computer. Manual installation works in any browser.</p>'}
+    <p class="cec-why">Different OS versions need different jailbreaks. We check your calculator and install the right one.</p>
+    ${usb ? '' : '<p class="cec-why">Direct USB needs Chrome or Edge on a computer. The manual installation below uses TI Connect CE instead.</p>'}
   `, 0, 'connect');
   if (!usb) return;
   $('#cec-go').onclick = () => work(async () => {
     say('Pick your calculator in the browser window that opens.');
+    // transport.link changes only once the device list has returned a calculator.
+    const before = transport.link;
     try {
       state.info = transport.info && !transport.poisoned ? transport.info : await transport.connect({ beforeOpen: claim });
     } catch (err) {
+      if (transport.link === before) markPicker(err);
       trackConnectFail(err);
       throw err;
     }
@@ -510,7 +588,7 @@ function viewRoute() {
       ? 'Check the About screen on the calculator and connect again.'
       : `<a href="${AUTHOR}" target="_blank" rel="noopener nofollow">The author's page</a> lists every version arTIfiCE covers.`}</p>`}
     ${next ? `<div class="cec-actions"><div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">${next[0]}</button></div></div>` : ''}
-  `, 1, `route_${route}`);
+  `, 1, `route_${route}`, { deadEnd: route === 'unknown' });
   if (next) $('#cec-next').onclick = next[1];
 }
 
@@ -723,7 +801,7 @@ function viewFilesV21() {
     heading: 'Send arTIfiCE v2.1 and Snake',
     action: 'Send arTIfiCE and Snake',
     also: '<button type="button" id="cec-only" class="cec-plain cec-alt" disabled>Send only arTIfiCE</button>',
-    after: '<p class="cec-why">arTIfiCE is a jailbreak program that lets your calculator run games. We\'ll send Snake along with it, so you have a game to run.</p>',
+    after: '<p class="cec-why">arTIfiCE is the jailbreak program that lets your calculator run games. We send Snake with it so you have a game to try.</p>',
     onSend: sendV21,
   });
   $('#cec-only').onclick = sendV21Only;
@@ -837,7 +915,7 @@ function viewV3Inequalz() {
       ${walk('ce-jb-v3-open-inequalz')}
       <div class="warn"><p>Send the trigger only while Inequalz is open on its Y= screen, the last picture above.</p></div>
       <label class="cec-confirm"><input type="checkbox" id="cec-open"> Inequalz is open on its Y= screen</label>`,
-    after: '<p class="cec-why">The calculator restarts on its own when the trigger lands. That is the install finishing.</p>',
+    after: '<p class="cec-why">The calculator restarts on its own when the trigger arrives. That\'s the install finishing.</p>',
     gate: () => !!$('#cec-open')?.checked,
   });
   $('#cec-open').onchange = renderPicked;
@@ -862,7 +940,7 @@ function viewV3Finish() {
     <p class="cec-sub">The calculator installs AsmHook2 and restarts on its own.</p>
     ${walk('ce-jb-v3-asmhook')}
     <div class="cec-actions"><div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">Done</button></div></div>
-    <p class="cec-why"><strong>Good to know.</strong> You only need to launch AsmHook2 once; it stays through restarts. After a RAM reset, launch it again. If Inequalz later reports CONFLICTING APPS, choose option 2, then launch AsmHook2 again after leaving it.</p>
+    <p class="cec-why"><strong>Good to know.</strong> Launch AsmHook2 once and it stays through restarts. After a RAM reset, launch it again. If Inequalz later shows CONFLICTING APPS, choose option 2, then leave Inequalz and launch AsmHook2 again.</p>
   `, 2, 'v3_finish');
   $('#cec-next').onclick = viewPlay;
 }
@@ -874,7 +952,7 @@ let playLink = null;
 async function gameLink() {
   if (transport.link && !transport.poisoned) return transport.link;
   if (!playLink) {
-    const link = await pickCalculator();
+    const link = await pickCalculator().catch(err => { throw markPicker(err); });
     await claim();
     await link.open();
     playLink = link;
@@ -936,7 +1014,7 @@ function sendGameButton(game) {
   work(async () => {
     const r = await sendGameTo(game);
     say(`${game.label} is on the calculator. ${startHint(String(state.info?.os || r.os), game.name)}`);
-    $('#cec-howto')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    $('#cec-howto')?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' });
   });
 }
 const sendActions = () => `
@@ -961,17 +1039,106 @@ function viewPlay() {
   if (transport.poisoned && !playLink) say('The calculator restarted, so your browser will ask you to pick it again when you press Send.');
 }
 
+// On a Chromebook the browser is Chrome already, so no WebUSB there reads as
+// USB turned off (as on some school Chromebooks), not as the wrong browser.
+const CHROMEOS_NO_USB = ['The installer can\'t use USB on this Chromebook', 'Some school Chromebooks don\'t let websites use USB devices. Try a Windows or Mac computer.'];
 function unavailable(message) {
   trackStep('no_webusb');
-  root().innerHTML = `<section class="cec-card"><h2>This page needs Chrome or Edge</h2>
-    <p>${esc(message)}</p>
+  const [title, text] = onChromeOS() ? CHROMEOS_NO_USB : ['The installer needs Chrome or Edge', message];
+  root().innerHTML = `<section class="cec-card"><h2>${esc(title)}</h2>
+    <p>${esc(text)}</p>
     <div class="cec-actions"><div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${WRITTEN}"${writtenAttrs()}>Manual installation</a></div></div></section>`;
+}
+
+// --- The manual installation under the wizard ------------------------------
+// The page's own HTML (#jbg) holds every route and every step, readable with
+// no script at all. Here each walk list (<ol class="jbg-walk" data-walk>)
+// becomes this wizard's stepped picture viewer for that walk (the list reads
+// exactly like WALKS[name]), and the OS picker
+// shows one route at a time (its button again closes it). An address ending
+// #os-<route> picks that route, which is where the wizard's Manual installation
+// link points once it knows the calculator's route. There is no route for versions after 5.8.5 (none
+// exists); a calculator that reports one gets the wizard's own screen, and its
+// Manual installation link goes to the section.
+// The section is a <details>, closed until the reader opens it, a link on the
+// page (the wizard's) jumps into it, or the address names it. ce_step counts
+// it once per page load: manual_open, and manual_<route> for each route shown
+// (the existing screen and route parameters).
+// The page splits the wizard's native route in two, since their steps differ
+// completely: asm (5.2 or earlier, start with Asm() and native (5.3 and 5.4,
+// start from prgm).
+const GUIDE_ROUTES = ['asm', 'native', 'v21', 'v3'];
+const guideRoute = info => (info?.route === 'native' && needsAsm(String(info.os)) ? 'asm' : info?.route);
+function manualHref() {
+  const route = guideRoute(state.info);
+  return WRITTEN.startsWith('#') && GUIDE_ROUTES.includes(route) ? `#os-${route}` : WRITTEN;
+}
+function mountGuide() {
+  const guide = $('#jbg');
+  if (!guide) return;
+  guide.querySelectorAll('ol.jbg-walk[data-walk]').forEach(ol => {
+    if (WALKS[ol.dataset.walk]) ol.outerHTML = keepKeyPunctuation(walk(ol.dataset.walk));
+  });
+  mountWalks(guide, { lazy: true });
+  const manual = guide.querySelector('details#manual');
+  const toManual = hash => hash === '#manual' || /^#os-/.test(hash);
+  if (manual) {
+    manual.addEventListener('toggle', () => { if (manual.open) trackStep('manual_open'); });
+    // Opened before the browser follows the link, so it can scroll to what is inside.
+    document.addEventListener('click', e => {
+      const a = e.target?.closest?.('a[href^="#"]');
+      if (a && toManual(a.getAttribute('href'))) manual.open = true;
+    }, true);
+    window.addEventListener('hashchange', () => { if (toManual(location.hash)) manual.open = true; });
+    if (toManual(location.hash)) {
+      manual.open = true;
+      if (location.hash === '#manual') manual.scrollIntoView({ block: 'start' });
+    }
+  }
+  const picker = guide.querySelector('.jbg-picker');
+  const panels = [...guide.querySelectorAll('.jbg-route')];
+  if (!picker || !panels.length) return;
+  const hint = guide.querySelector('.jbg-hint');
+  const buttons = [...picker.querySelectorAll('button[data-route]')];
+  const hashRoute = () => {
+    const route = (/^#os-([a-z0-9]+)$/.exec(location.hash) || [])[1];
+    return GUIDE_ROUTES.includes(route) ? route : null;
+  };
+  const pick = route => {
+    buttons.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.route === route)));
+    panels.forEach(p => { p.hidden = p.dataset.route !== route; });
+    if (hint) hint.hidden = !!route;
+    if (route) trackStep(`manual_${route}`);
+  };
+  // The heading above the picker (the Find your OS version toggle sits between
+  // them), so the reader sees what the buttons are for.
+  let heading = picker.previousElementSibling;
+  while (heading && heading.tagName !== 'H3') heading = heading.previousElementSibling;
+  const reveal = () => (heading || picker).scrollIntoView({ block: 'start' });
+  // Pressing the open route's button again closes it,
+  // and the address drops its #os- so a reload doesn't reopen it.
+  buttons.forEach(b => {
+    b.onclick = () => {
+      const route = b.getAttribute('aria-pressed') === 'true' ? null : b.dataset.route;
+      pick(route);
+      history.replaceState(null, '', route ? `#os-${route}` : location.pathname + location.search);
+    };
+  });
+  window.addEventListener('hashchange', () => {
+    const route = hashRoute();
+    if (!route) return;
+    pick(route);
+    reveal();
+  });
+  picker.hidden = false;
+  pick(hashRoute());
+  if (hashRoute()) reveal();
 }
 
 // On localhost only: paint any screen from a made-up OS version, so every
 // screen can be looked at without a calculator. Nothing here sends.
 //   ?screen=<name>  one screen (PREVIEW_SCREENS)   &picked=1  files in hand
-//   &error=<text>   the error band                 &fail=<code>  a library error's band
+//   &error=<text>   the error band                 &fail=<code>  a library error's band (PICKER: the device list failed)
 //   &win=1, &cros=1 Windows or Chrome OS wording
 const PREVIEW_SCREENS = {
   connect: ['5.8.5', viewConnect],
@@ -1013,9 +1180,11 @@ function installPreview() {
     renderPicked();
   };
   window.__cecPreviewError = message => { fail(refusal('PREVIEW', message)); };
-  // CALC_ERROR_<decimal> is a calculator refusal with that code.
+  // CALC_ERROR_<decimal> is a calculator refusal with that code; PICKER is a
+  // device list that failed to open.
   window.__cecPreviewFail = code => {
     const n = /^CALC_ERROR_(\d+)$/.exec(code);
+    if (code === 'PICKER') return fail(markPicker(new CELinkError('USB_ERROR', 'The browser could not show the device list: previewed.')));
     fail(n ? new CELinkError('CALC_ERROR', 'A previewed refusal.', { calcError: Number(n[1]) }) : refusal(code, code));
   };
   window.__cecPreviewWindows = on => { forceWindows = !!on; };
@@ -1034,13 +1203,15 @@ function installPreview() {
 }
 
 function boot() {
+  // The manual installation needs no USB, so it comes before every check.
+  mountGuide();
   if (!root()) return;
   // First, so previews have it too.
   keyHelp = mountKeyHelp('cec', { onOpen: () => track('ce_key_help', { page: 'installer' }) });
   // Before the WebUSB check: a preview may load in a frame, which has no WebUSB.
   if (installPreview()) return;
   if (!navigator.usb) {
-    unavailable('Sending files straight to a calculator only works in Chrome or Edge on a computer. Manual installation works in any browser.');
+    unavailable('Sending files straight to a calculator only works in Chrome or Edge on a computer. The manual installation below uses TI Connect CE instead.');
     return;
   }
   // Release the calculator on leaving, so the games hub in the same tab can open it.

@@ -60,7 +60,7 @@ import { CELink } from '../celink.mjs';
 // data-ce-parts the address of the games whose optional parts a send can
 // leave out when the archive is short (core's partsOf, gamesend's sendGame).
 const SETUP = document.querySelector('script[src*="/ce-send.mjs"]')?.dataset ?? {};
-const INSTALLER = SETUP.ceInstaller || '/ti84plusce-jailbreak-installer/';
+const INSTALLER = SETUP.ceInstaller || '/ti84plusce-jailbreak-tutorial/';
 const INSTALLER_TARGET = /^https?:\/\//.test(INSTALLER) ? ' target="_blank" rel="noopener"' : '';
 const HUB = '/downloads/ti84plusce/games/';
 const MATH = '/downloads/ti84plusce/math/';
