@@ -521,7 +521,7 @@ export function isCE(productName) {
  */
 export function checkCalculator(model, os) {
   if (!/^TI-84(?:\+| Plus )CE(?: USB)?$/.test(model)) {
-    throw refusal('WRONG_MODEL', `Detected ${model || 'an unknown model'}. Connect a TI-84 Plus CE.`);
+    throw refusal('WRONG_MODEL', `Detected ${model || 'an unknown model'}. Connect a TI-84 Plus CE.`, { model });
   }
   if (!/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(os)) throw refusal('NO_OS_VERSION', 'Could not read an exact OS version. No files will be sent.');
   return { model, os, route: compatibility(os) };
@@ -605,7 +605,11 @@ export function platformName(nav) {
 //                math | installer; ce_delete and ce_delete_reason: hub | game | math;
 //                ce_rate: hub | game | math
 //   open_detail  ce_connect_fail: openDetail; ce_send_fail and a failed ce_delete, only for a
-//                stalled listing: stalled_list | stalled_list_again (stallDetail)
+//                stalled listing: stalled_list | stalled_list_again (stallDetail);
+//                ce_connect_fail other_model or wrong_model: the picked device's USB product id
+//                as four lower-case hex digits, e.g. e003 (notCEParams)
+//   evo_hw       ce_connect_fail other_model or wrong_model: the model the calculator named,
+//                as ce_calc_info sends it, when it is plain letters, digits, spaces and + . -
 
 export const PREVIEW_HOST = typeof location !== 'undefined' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
@@ -625,10 +629,38 @@ let connectFails = 0;
  * `retried`: how many failed connects this page load reported before this
  * one (0 for the first; 9 stands for 9 or more).
  */
-export function trackConnectFail(err, extra = {}) {
+export function trackConnectFail(err, extra = {}, device) {
+  const reason = failReason(err);
   const detail = openDetail(err);
   const retried = Math.min(connectFails++, 9);
-  track('ce_connect_fail', { reason: failReason(err), ...(detail && { open_detail: detail }), ...refusedAt(err), retried, ...extra });
+  track('ce_connect_fail', { reason, ...(detail && { open_detail: detail }), ...notCEParams(reason, err, device), ...refusedAt(err), retried, ...extra });
+}
+
+// The reasons for a calculator that answered but is not a TI-84 Plus CE: the
+// games pages' other_model and the installer's stricter wrong_model.
+export const NOT_CE_REASONS = Object.freeze(['other_model', 'wrong_model']);
+// A model name as a calculator reports it, sent only when it is this plain.
+const PLAIN_MODEL = /^[A-Za-z0-9 +.-]{1,40}$/;
+
+/** A USB device's product id as four lower-case hex digits (0xE003 is 'e003'), or undefined. */
+export function productHex(device) {
+  const id = device?.productId;
+  return Number.isInteger(id) && id >= 0 && id <= 0xFFFF ? id.toString(16).padStart(4, '0') : undefined;
+}
+
+/**
+ * ce_connect_fail's extra parameters for a calculator that is not a TI-84
+ * Plus CE (NOT_CE_REASONS): the picked `device`'s product id in open_detail,
+ * and the model the calculator named (the refusal's `model`) in evo_hw.
+ * Nothing for any other reason. The TI-84 Plus Silver Edition and the TI-84
+ * Plus C Silver Edition share the CE's product id, e008, so the model is
+ * what tells those apart.
+ */
+export function notCEParams(reason, err, device) {
+  if (!NOT_CE_REASONS.includes(reason)) return {};
+  const id = productHex(device);
+  const model = typeof err?.model === 'string' && PLAIN_MODEL.test(err.model) ? err.model : undefined;
+  return { ...(id && { open_detail: id }), ...(model && { evo_hw: model }) };
 }
 
 // What a Connect click says when another tab of the site is sending or
@@ -1276,11 +1308,16 @@ export function evoHtml(page, href) {
   return `${esc(evoText(page))} <a href="${esc(href)}"${target}>${words}</a>`;
 }
 
-/** The `reason` for an error from the cable or a file, or undefined. */
+/**
+ * The `reason` for an error from the cable or a file, or undefined.
+ * no_webusb is a browser without WebUSB; other_model is a calculator that
+ * answered but is not a TI-84 Plus CE. Both were `unsupported` before.
+ */
 export function linkReason(err) {
   const code = err?.code;
   if (code === 'NO_DEVICE_SELECTED' || err?.name === 'NotFoundError') return 'no_device';
-  if (code === 'NO_WEBUSB' || code === 'OTHER_MODEL') return 'unsupported';
+  if (code === 'NO_WEBUSB') return 'no_webusb';
+  if (code === 'OTHER_MODEL') return 'other_model';
   if (code === 'TI84_EVO') return 'evo';
   if (code === 'OPEN_FAILED') return 'open_failed';
   if (code === 'TIMEOUT') return 'timeout';

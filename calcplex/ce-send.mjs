@@ -402,7 +402,9 @@ async function connect(say, { quiet = false } = {}) {
     if (l) await l.close().catch(() => {});
     calc = null;
     stalls.note(err, { connecting: true });
-    if (!quiet) trackConnectFail(err, { page });
+    // The picked device, when there was one: a calculator that is not a CE
+    // reports its USB product id.
+    if (!quiet) trackConnectFail(err, { page }, l?.device);
     throw err;
   }
   link = l;

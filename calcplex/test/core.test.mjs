@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import {
   LEAVE_SHELL_KEY, OFFICIAL, ROUTES, RUNNING_TEXT, archiveMode, calcParams, checkCalculator, compatibility, digest,
   downloadParams, esc, failReason, fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, isCE,
-  isChromeOS, isWindows, jbPromptChoice, launchesArchived, linkDead, linkReason, needsAsm, officialFiles, openDetail,
+  isChromeOS, isWindows, jbPromptChoice, NOT_CE_REASONS, notCEParams, productHex, launchesArchived, linkDead, linkReason, needsAsm, officialFiles, openDetail,
   pageErrorText, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable,
   sameVariable, startHint, stepTracker, unknownRefusal,
   deleteParams, STALL_TEXT, STALL_RESET_TEXT, STALL_HOOK_TEXT, stalledListing, stallText, stallDetail, stallLog,
@@ -217,8 +217,8 @@ test('linkReason maps library codes to the fixed reasons, and leaves the rest to
   const reason = (code, extra) => linkReason({ code, ...extra });
   assert.equal(reason('NO_DEVICE_SELECTED'), 'no_device');
   assert.equal(linkReason({ name: 'NotFoundError' }), 'no_device');
-  assert.equal(reason('NO_WEBUSB'), 'unsupported');
-  assert.equal(reason('OTHER_MODEL'), 'unsupported');
+  assert.equal(reason('NO_WEBUSB'), 'no_webusb');
+  assert.equal(reason('OTHER_MODEL'), 'other_model');
   assert.equal(reason('OPEN_FAILED'), 'open_failed');
   assert.equal(reason('TIMEOUT'), 'timeout');
   assert.equal(reason('CALC_ERROR', { calcError: 0x0011 }), 'calc_busy');
@@ -247,7 +247,7 @@ test('installerFailReason: the installer\'s own reasons, where they differ from 
   assert.equal(installerFailReason({ code: 'COLLISION', names: ['PPPP', 'INEQUVAR'] }), 'other');
   for (const [code, reason] of [['NOT_VERIFIED', 'readback_mismatch'], ['BAD_HASH', 'bad_hash'], ['FETCH', 'fetch_failed'],
     ['WRONG_ROUTE', 'wrong_route'], ['WRONG_MODEL', 'wrong_model'], ['BAD_FILE', 'bad_file'], ['BAD_APP', 'other'],
-    ['NO_WEBUSB', 'unsupported'], ['OTHER_MODEL', 'unsupported'], ['TIMEOUT', 'timeout'], ['PROTOCOL', 'link_lost'], ['POISONED', 'other']]) {
+    ['NO_WEBUSB', 'no_webusb'], ['OTHER_MODEL', 'other_model'], ['TIMEOUT', 'timeout'], ['PROTOCOL', 'link_lost'], ['POISONED', 'other']]) {
     assert.equal(installerFailReason({ code }), reason, code);
   }
 });
@@ -555,4 +555,31 @@ test('pageErrorText: the page\'s stall words replace the stopped-responding word
   assert.equal(pageErrorText(e1, { page: 'game', own: own(e1) }), STALL_TEXT);
   const e0 = new CELinkError('TIMEOUT', 'x');
   assert.equal(pageErrorText(e0, { page: 'game', own: own(e0) }), 'LOST');
+});
+
+test('productHex: a USB product id as four lower-case hex digits', () => {
+  assert.equal(productHex({ productId: 0xE003 }), 'e003');
+  assert.equal(productHex({ productId: 0xE008 }), 'e008');
+  assert.equal(productHex({ productId: 0x0001 }), '0001');
+  for (const d of [undefined, null, {}, { productId: -1 }, { productId: 0x10000 }, { productId: 1.5 }, { productId: '57347' }]) {
+    assert.equal(productHex(d), undefined, JSON.stringify(d));
+  }
+});
+
+test('notCEParams: the product id and the model, only for a calculator that is not a CE', () => {
+  assert.deepEqual(NOT_CE_REASONS, ['other_model', 'wrong_model']);
+  const plus = refusal('OTHER_MODEL', 'x', { model: 'TI-84 Plus' });
+  assert.deepEqual(notCEParams('other_model', plus, { productId: 0xE003 }), { open_detail: 'e003', evo_hw: 'TI-84 Plus' });
+  assert.deepEqual(notCEParams('wrong_model', refusal('WRONG_MODEL', 'x', { model: 'TI-84 Plus Silver Edition' }), { productId: 0xE008 }),
+    { open_detail: 'e008', evo_hw: 'TI-84 Plus Silver Edition' });
+  // No device known (the picker never returned one): the model alone.
+  assert.deepEqual(notCEParams('other_model', plus, undefined), { evo_hw: 'TI-84 Plus' });
+  // A model that is not plain, or none: the product id alone.
+  for (const model of ['', 'TI<84>', 'x'.repeat(41), 'TI-84\nPlus', undefined, 42]) {
+    assert.deepEqual(notCEParams('other_model', refusal('OTHER_MODEL', 'x', { model }), { productId: 0xE003 }), { open_detail: 'e003' }, String(model));
+  }
+  // Every other reason: nothing, even with a device.
+  for (const reason of ['no_webusb', 'no_device', 'open_failed', 'timeout', 'evo', 'other', 'unsupported']) {
+    assert.deepEqual(notCEParams(reason, plus, { productId: 0xE003 }), {}, reason);
+  }
 });

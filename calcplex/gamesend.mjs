@@ -134,7 +134,7 @@ export function readyEach(link) {
 export async function identify(link) {
   const info = await link.info();
   if (!isCE(info.productName)) {
-    throw refusal('OTHER_MODEL', `This is a ${info.productName || 'calculator this page does not know'}. These files are for the TI-84 Plus CE.`);
+    throw refusal('OTHER_MODEL', `This is a ${info.productName || 'calculator this page does not know'}. These files are for the TI-84 Plus CE.`, { model: info.productName });
   }
   return {
     model: info.productName, os: info.osVersion, route: compatibility(info.osVersion),

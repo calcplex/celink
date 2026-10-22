@@ -312,7 +312,7 @@ function progress() {
 // a failure the manual installation can't fix either: an Evo, a calculator
 // that isn't a CE, a low battery, another tab busy with it, a program left
 // running. A version arTIfiCE doesn't cover has no manual route either.
-const NO_MANUAL = ['evo', 'unsupported', 'wrong_model', 'low_battery', 'tab_busy'];
+const NO_MANUAL = ['evo', 'no_webusb', 'other_model', 'wrong_model', 'low_battery', 'tab_busy'];
 function showManual(on) {
   const a = root()?.querySelector('.cec-manual');
   if (a) a.hidden = !on;
@@ -563,7 +563,8 @@ function viewConnect() {
       state.info = transport.info && !transport.poisoned ? transport.info : await transport.connect({ beforeOpen: claim });
     } catch (err) {
       if (transport.link === before) markPicker(err);
-      trackConnectFail(err);
+      // A calculator picked this time that is not a CE reports its USB product id.
+      trackConnectFail(err, {}, transport.link === before ? undefined : transport.link?.device);
       throw err;
     }
     if (!state.reportedInfo) {
