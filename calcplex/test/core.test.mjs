@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import {
   LEAVE_SHELL_KEY, OFFICIAL, ROUTES, RUNNING_TEXT, archiveMode, calcParams, checkCalculator, compatibility, digest,
   downloadParams, esc, failReason, fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, isCE,
-  isChromeOS, isWindows, jbPromptChoice, NOT_CE_REASONS, notCEParams, productHex, launchesArchived, linkDead, linkReason, needsAsm, officialFiles, openDetail,
+  isChromeOS, isWindows, jbPromptChoice, NOT_CE_REASONS, notCEParams, productHex, INSTALLER_RETURNS, installerReturn, installerWithReturn, launchesArchived, linkDead, linkReason, needsAsm, officialFiles, openDetail,
   pageErrorText, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable,
   sameVariable, startHint, stepTracker, unknownRefusal,
   deleteParams, STALL_TEXT, STALL_RESET_TEXT, STALL_HOOK_TEXT, stalledListing, stallText, stallDetail, stallLog,
@@ -582,4 +582,23 @@ test('notCEParams: the product id and the model, only for a calculator that is n
   for (const reason of ['no_webusb', 'no_device', 'open_failed', 'timeout', 'evo', 'other', 'unsupported']) {
     assert.deepEqual(notCEParams(reason, plus, { productId: 0xE003 }), {}, reason);
   }
+});
+
+test('installer ?next=: only a listed page, word for word, gets a way back', () => {
+  const PLEXMATH = '/downloads/ti84plusce/math/plexmath/';
+  assert.equal(installerReturn(''), null);
+  assert.equal(installerReturn('?screen=play-v3'), null);
+  for (const search of [`?next=${PLEXMATH}`, `?next=${encodeURIComponent(PLEXMATH)}`, `?screen=play-v3&next=${PLEXMATH}`]) {
+    assert.deepEqual(installerReturn(search), { href: PLEXMATH, name: 'PlexMath' }, search);
+  }
+  for (const next of ['https://evil.example/downloads/ti84plusce/math/plexmath/', '//evil.example/downloads/ti84plusce/math/plexmath/',
+    'http://calcplex.com/downloads/ti84plusce/math/plexmath/', 'javascript:alert(1)', '/downloads/ti84plusce/math/plexmath',
+    '/downloads/ti84plusce/math/plexmath/?x=1', '/downloads/ti84plusce/math/plexmath/#x', '/downloads/ti84plusce/games/', '/', '',
+    '/downloads/ti84plusce/math/plexmath/../../games/', '\\\\evil.example', ' /downloads/ti84plusce/math/plexmath/', 'constructor', '__proto__', 'toString']) {
+    assert.equal(installerReturn(`?next=${encodeURIComponent(next)}`), null, next);
+  }
+  assert.equal(installerReturn(`?next=/x/&next=${PLEXMATH}`), null);
+  assert.equal(installerWithReturn('/ti84plusce-jailbreak-tutorial/', PLEXMATH), `/ti84plusce-jailbreak-tutorial/?next=${PLEXMATH}`);
+  assert.equal(installerWithReturn('/ti84plusce-jailbreak-tutorial/', 'https://evil.example/'), '/ti84plusce-jailbreak-tutorial/');
+  for (const path of Object.keys(INSTALLER_RETURNS)) assert.match(path, /^\/[a-z0-9/-]+\/$/, path);
 });

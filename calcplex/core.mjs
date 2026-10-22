@@ -839,6 +839,64 @@ export function jbPromptChoice(closedWith) {
   return closedWith === 'installer' || closedWith === 'send_anyway' ? closedWith : 'cancel';
 }
 
+/**
+ * The pages' full-screen popup (class ce-modal): `html` inside a <dialog>,
+ * resolving what `wire(dialog, done)` passes to done. Escape or a click
+ * outside resolves false. Outside means on the backdrop, pressed and
+ * released there: a click on the dialog's own padding stays, and so does
+ * the second click of a double-click that opened the dialog. `stay()`, when
+ * given, keeps the dialog open against Escape and a click outside while it
+ * returns true.
+ */
+export function modal(html, wire, { stay = () => false, className = 'ce-modal' } = {}) {
+  return new Promise(resolve => {
+    const d = document.createElement('dialog');
+    d.className = className;
+    d.innerHTML = html;
+    document.body.append(d);
+    const done = v => {
+      if (!d.open) return;
+      d.close();
+      d.remove();
+      resolve(v);
+    };
+    const outside = e => {
+      const r = d.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    let pressedOutside = false;
+    d.addEventListener('cancel', e => { e.preventDefault(); if (!stay()) done(false); });
+    d.addEventListener('pointerdown', e => { pressedOutside = e.target === d && outside(e); });
+    d.addEventListener('click', e => {
+      if (e.target === d && pressedOutside && e.detail < 2 && outside(e) && !stay()) done(false);
+      pressedOutside = false;
+    });
+    wire(d, done);
+    d.showModal();
+  });
+}
+
+// The pages the jailbreak installer can send a student back to when the
+// jailbreak is done, by path, with the name its last screen shows. The
+// installer's address carries the path as ?next=<path>; anything that is not
+// one of these paths, exactly, is ignored, and the name always comes from here.
+export const INSTALLER_RETURNS = {
+  '/downloads/ti84plusce/math/plexmath/': 'PlexMath',
+};
+
+/** The page `search` (?next=<path>) names: { href, name } from INSTALLER_RETURNS, or null. */
+export function installerReturn(search) {
+  let next = null;
+  try { next = new URLSearchParams(search).get('next'); } catch { return null; }
+  const href = Object.keys(INSTALLER_RETURNS).find(p => p === next);
+  return href ? { href, name: INSTALLER_RETURNS[href] } : null;
+}
+
+/** The installer's address that comes back to `path` when it is done (`path` one of INSTALLER_RETURNS). */
+export function installerWithReturn(installer, path) {
+  return Object.hasOwn(INSTALLER_RETURNS, path) ? `${installer}?next=${path}` : installer;
+}
+
 // A download's name as the site gives it: the file name without its folder
 // or extension, e.g. "SnakeCE" for /downloads/ce/SnakeCE.8xg.
 export const downloadName = file => file.split('/').pop().replace(/\.[^.]+$/, '');

@@ -34,7 +34,7 @@ import {
   jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
   feedbackText, sendFeedback, startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
   rateParams, ratedNote, ratedStars, rememberRating, rememberRatingNote, rememberSend, sentAgo, evoAddress, evoHtml, evoText, isEvoDevice,
-  openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, sendOutcome, stallLog, stallText, stallDetail,
+  openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, sendOutcome, stallLog, stallText, stallDetail, modal,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
@@ -499,37 +499,7 @@ if (INSTALLER_TARGET) {
   }, true);
 }
 
-// `wire(dialog, done)` sets the buttons; Escape or a click outside resolves false.
-// Outside means on the backdrop, pressed and released there: a click on the
-// dialog's own padding stays, and so does the second click of a double-click
-// that opened the dialog.
-function modal(html, wire) {
-  return new Promise(resolve => {
-    const d = document.createElement('dialog');
-    d.className = 'ce-modal';
-    d.innerHTML = html;
-    document.body.append(d);
-    const done = v => {
-      if (!d.open) return;
-      d.close();
-      d.remove();
-      resolve(v);
-    };
-    const outside = e => {
-      const r = d.getBoundingClientRect();
-      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
-    };
-    let pressedOutside = false;
-    d.addEventListener('cancel', e => { e.preventDefault(); done(false); });
-    d.addEventListener('pointerdown', e => { pressedOutside = e.target === d && outside(e); });
-    d.addEventListener('click', e => {
-      if (e.target === d && pressedOutside && e.detail < 2 && outside(e)) done(false);
-      pressedOutside = false;
-    });
-    wire(d, done);
-    d.showModal();
-  });
-}
+// The popups below are core's modal().
 
 // Without TI Connect CE's driver, Chrome's picker on Windows is empty
 // (observed on Windows). Asked once per browser, before the first picker.
@@ -718,6 +688,37 @@ async function run({ file, label, say, show }) {
 // a delete changed the calculator, whether or not it finished.
 // After a send it runs before the Sent message, which tells the student to
 // start the game: a running game stops the calculator answering.
+// A card marked data-ce-app="<name>" is an app that installs through its own
+// module (an app's setup files and its steps at the calculator), which
+// registers window.ceSendOwn[<name>] = job. Its Send connects as any card's
+// does, then lends the job this page's link: job({ link, calc }) runs with
+// every other button held and resolves { rows, dead }: its last listing of
+// the calculator (this page takes no new one, since the student may be
+// running the app's setup by then) and whether the link died.
+async function runOwn(name, { file, say, show }) {
+  const job = window.ceSendOwn?.[name];
+  if (busy || connecting || typeof job !== 'function') return;
+  busy = true;
+  changed();
+  try {
+    await connect(say);
+    say('');
+    const r = await job({ link, calc });
+    if (r?.dead) await drop();
+    else if (Array.isArray(r?.rows) && calc) {
+      calc.owned = keepOwned(calc.owned, r.rows);
+      calc.rows = r.rows;
+    }
+  } catch (err) {
+    say('');
+    if (linkDead(err)) await drop();
+    if (err?.code !== 'CANCELLED') show(`<p>${errorHtml(err)}</p>${failDownload(file, err)}`, 'bad');
+  } finally {
+    busy = false;
+    changed();
+  }
+}
+
 async function refreshRows() {
   if (!link) return;
   try {
@@ -1372,9 +1373,12 @@ function mountSplit(card, a) {
     if (t) show(`<p>${esc(t)}</p>` + (pct != null && SETUP.ceProgress === 'bar' ? `<div class="ce-bar"><span style="width:${Math.max(0, Math.min(100, pct))}%"></span></div>` : ''), 'busy');
     else if (status.classList.contains('is-busy')) show('', '');
   };
+  // A card marked data-ce-app installs through another module's job (runOwn).
+  const app = card.dataset.ceApp;
   const send = () => {
     closeMenus();
-    run({ file, label, say, show });
+    if (app) runOwn(app, { file, say, show });
+    else run({ file, label, say, show });
   };
   const remove = () => removeGame({ file, label, say, show });
   status.addEventListener('click', e => {
@@ -1383,7 +1387,7 @@ function mountSplit(card, a) {
   });
   let mode = '';
   // The math hub has no games list, so its few small downloads say what each card sends.
-  const here = presence(file, label, () => paint(), { fetchGame: page === 'math' });
+  const here = app ? () => false : presence(file, label, () => paint(), { fetchGame: page === 'math' });
   // Send-only cards (data-ce-split="off") never offer stars, so they get no row.
   const rate = swap ? () => {} : mountRate(status, { file, label, demo: DEMO_RATE && card === document.querySelector('.wp-block-media-text') });
   const paint = () => {

@@ -10,7 +10,7 @@ import { CETransport } from './transport.mjs';
 import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
   INEQUALZ_URL, LEAVE_SHELL_KEY, OFFICIAL, PREVIEW_HOST, ROUTES, RUNNING_TEXT, TICONNECT_URL, archiveMode, calcParams, compatibility, esc,
-  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, isChromeOS, isWindows, keyHelpHtml, linkDead, mountKeyHelp,
+  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, installerReturn, isChromeOS, isWindows, keyHelpHtml, linkDead, mountKeyHelp,
   needsAsm, officialFiles, openDetail, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable, startHint,
   stepTracker, tabHandoff, track, trackConnectFail, unknownRefusal, TAB_BUSY_TEXT,
 } from './core.mjs';
@@ -23,6 +23,9 @@ const RELEASE = tag => `https://github.com/YvanTT/arTIfiCE/releases/tag/${tag}`;
 const WRITTEN = document.getElementById('cec-shell')?.dataset.writtenSteps || '#manual';
 const writtenAttrs = () => (/^https?:/.test(WRITTEN) ? ' target="_blank" rel="noopener nofollow"' : '');
 const GAMES = '/downloads/ti84plusce/games/';
+// A page that sent the student here with ?next=<path> (core's
+// INSTALLER_RETURNS): the last screen goes back there instead of to games.
+const BACK = installerReturn(location.search);
 // The connection picture, served beside this module.
 const ART = '/ti84plusce-jailbreak-tutorial/connection.svg';
 // The game the Play screen sends: one assembly program, no C libraries.
@@ -168,14 +171,19 @@ function mountWalks(scope = root(), { lazy = false } = {}) {
 
 // Every route ends on the games hub, in this tab: the page lets go of the
 // calculator on leaving, so the hub can open it.
-const gamesActions = () => `
+const gamesActions = () => (BACK ? backActions() : `
     <div class="cec-actions">
       <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${GAMES}">Send more games to your calculator</a></div>
+    </div>`);
+const backActions = () => `
+    <div class="cec-actions">
+      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${esc(BACK.href)}">Go back to ${esc(BACK.name)}</a></div>
     </div>`;
 
 const $ = s => document.querySelector(s);
 
-const STEPS = ['Connect', 'Check', 'Install', 'Play'];
+// Sent here from a page (BACK), the last step is going back to it, not playing.
+const STEPS = ['Connect', 'Check', 'Install', BACK ? 'Done' : 'Play'];
 
 // Where the words are ours. Refusals read through refusalText; anything else
 // shows the error's own message.
@@ -862,6 +870,7 @@ function offerSkip() {
 // Send only arTIfiCE; its ce_step name keeps the two apart.
 const runScreen = ({ snake, only }) => (snake ? 'v21_run' : only ? 'v21_run_only' : 'v21_run_nosnake');
 function viewV21Run({ snake, only = false }) {
+  if (BACK) return viewBack('arTIfiCE is on the calculator as program A.');
   paint(`
     <h2>Run arTIfiCE</h2>
     <p class="cec-sub">${snake ? `arTIfiCE and ${GAME.label} are on the calculator.` : 'arTIfiCE is on the calculator as program A.'}</p>
@@ -1027,6 +1036,7 @@ function wireSends() {
 // The v3 route's last screen (v2.1 sends Snake with arTIfiCE). The button
 // comes first, how to start a game under it.
 function viewPlay() {
+  if (BACK) return viewBack('');
   paint(`
     <h2>Put a game on it</h2>
     <p class="cec-sub">Send Snake to see it work.</p>
@@ -1038,6 +1048,16 @@ function viewPlay() {
   // A CE has no USB serial number, so after the v3 restart the browser no
   // longer knows it (observed on hardware on 5.8.5).
   if (transport.poisoned && !playLink) say('The calculator restarted, so your browser will ask you to pick it again when you press Send.');
+}
+
+// The last screen for a student a page sent here (BACK): the jailbreak is
+// in, so the way on is back to that page, in this tab.
+function viewBack(lead) {
+  paint(`
+    <h2>Your calculator is jailbroken</h2>
+    ${lead ? `<p class="cec-sub">${lead}</p>` : ''}
+    ${backActions()}
+  `, 3, 'back');
 }
 
 // On a Chromebook the browser is Chrome already, so no WebUSB there reads as
