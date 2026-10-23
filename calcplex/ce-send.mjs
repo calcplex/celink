@@ -11,6 +11,9 @@
 // again first under the arrow. The math page does the same, but only for a
 // program whose content matches a version the site served: a student's own
 // program under the same name never gets Delete.
+// Before a calculator is connected, the arrow also offers Delete from
+// calculator (Delete on): it connects as Send does, then runs that card's
+// Delete, confirm and all, when the calculator has the game. Nothing is sent.
 // A Sent message for an assembly game ends with a help link, which opens
 // answers for the calculator's route; on the math page, where programs arrive
 // archived on 5.3 and later, it ends with "Can't find it?". Wherever a sentence names the prgm
@@ -1009,8 +1012,9 @@ function followSpaceLists() {
 // nothing. From the out-of-space list (`space`), the outcome keeps the rest
 // of the list under it, and only the calculator that refused is touched: if
 // another one was plugged in while the confirm was open, its list is gone
-// and nothing is deleted.
-async function removeGame({ file, label, say, show, space = null }) {
+// and nothing is deleted. `via` ('menu': the arrow's Delete from calculator,
+// below) rides every ce_delete of the click as `from`.
+async function removeGame({ file, label, say, show, space = null, via = '' }) {
   closeMenus();
   if (busy || !(link && calc)) return;
   // The files the game writes while it runs (high scores, settings), from the
@@ -1037,6 +1041,7 @@ async function removeGame({ file, label, say, show, space = null }) {
   changed();
   const lastReason = space?.lastReason;
   const from = { page, route: calc.route, lastReason };
+  const withVia = params => (via ? { ...params, from: via } : params);
   const { os, route } = calc;
   let game = label.slice(0, 20);
   try {
@@ -1057,19 +1062,19 @@ async function removeGame({ file, label, say, show, space = null }) {
     await announceContents();
     say('');
     if (r.deleted.length) {
-      track('ce_delete', deleteParams({ ...from, game, outcome: 'deleted', bytes: r.bytes }));
+      track('ce_delete', withVia(deleteParams({ ...from, game, outcome: 'deleted', bytes: r.bytes })));
       outcome(`<p>${esc(label)} was deleted from your calculator.</p>`, 'ok', { game, label, os, route, lastReason });
     } else if (r.notOurs?.length) {
-      track('ce_delete', deleteParams({ ...from, game, outcome: 'not_ours' }));
+      track('ce_delete', withVia(deleteParams({ ...from, game, outcome: 'not_ours' })));
       outcome(`<p>The ${esc(r.notOurs[0].name)} on your calculator isn't the one from this page, so it wasn't deleted.</p>`, 'warn');
     } else {
-      track('ce_delete', deleteParams({ ...from, game, outcome: 'nothing' }));
+      track('ce_delete', withVia(deleteParams({ ...from, game, outcome: 'nothing' })));
       outcome(`<p>${esc(label)} isn't on your calculator.</p>`, 'warn');
     }
   } catch (err) {
     say('');
     if (stalls.note(err)?.stalls) err.route ??= route;
-    track('ce_delete', deleteParams({ ...from, game, outcome: 'failed', err }));
+    track('ce_delete', withVia(deleteParams({ ...from, game, outcome: 'failed', err })));
     if (linkDead(err)) await drop();
     else await refreshRows();
     outcome(`<p>${err?.code === 'READBACK' ? esc(`${label} is still on your calculator. Try again.`) : errorHtml(err)}</p>`, 'bad');
@@ -1077,6 +1082,33 @@ async function removeGame({ file, label, say, show, space = null }) {
     busy = false;
     changed();
   }
+}
+
+// Delete from calculator under the arrow, before a calculator is connected:
+// connect as Send does (the TI Connect CE question, the picker, the same
+// failure words through `failed`, without the file, which a failed Delete
+// never offers either), then the card's own Delete when the listing has its
+// game, by the rule the card's main button follows (`fetchGame` as its
+// presence check has it). A game that is not there says so, as a Delete that
+// found nothing does. Nothing is ever sent.
+async function removeFirst({ file, label, say, show, fetchGame, failed }) {
+  closeMenus();
+  if (busy || connecting) return;
+  if (!(link && calc)) {
+    await connectFromClick(say, failed);
+    say('');
+  }
+  if (busy || !(link && calc)) return;
+  const there = await gameOnCalculator(file, label, calc.rows, { fetchGame }).catch(() => false);
+  if (busy || !(link && calc)) return;
+  if (there) {
+    await removeGame({ file, label, say, show, via: 'menu' });
+    return;
+  }
+  const game = await gameName(file, label).catch(() => label.slice(0, 20));
+  if (!calc) return;
+  track('ce_delete', { ...deleteParams({ page, route: calc.route, game, outcome: 'nothing' }), from: 'menu' });
+  show(`<p>${esc(label)} isn't on your calculator.</p>`, 'warn');
 }
 
 // Stars: "Played it? Rate it:" under the card of a game on the
@@ -1216,6 +1248,11 @@ function mountGame() {
     say('');
   };
   const remove = () => removeGame({ file, label, say, show });
+  const removeHere = () => {
+    if (busy || connecting) return;
+    clearResult();
+    removeFirst({ file, label, say, show, fetchGame: true, failed: err => show(`<p>${errorHtml(err)}</p>`, 'bad') });
+  };
   result.addEventListener('click', e => {
     if (e.target.closest('.ce-close')) clearResult();
     else if (e.target.closest('.ce-send-again')) send();
@@ -1244,8 +1281,8 @@ function mountGame() {
       if (mode === 'gate') {
         actions.innerHTML = `<a class="ce-conn-go ce-gate-go" href="${href}"${downloadLinkAttrs()}>Download ${esc(label)}</a>`;
       } else if (mode === 'delete' || FIRST) {
-        actions.innerHTML = `<div class="ce-split ce-leaf-split${mode === 'delete' ? ' is-delete' : ''}">${splitHtml(mode, { href, label, dl: FIRST ? firstLabel(file) : '' })}</div>`;
-        wireSplit(actions.firstElementChild, mode, { send: mode === 'connect' ? go : send, remove });
+        actions.innerHTML = `<div class="ce-split ce-leaf-split${mode === 'delete' ? ' is-delete' : ''}">${splitHtml(mode, { href, label, dl: FIRST ? firstLabel(file) : '', remove: deleteOn() })}</div>`;
+        wireSplit(actions.firstElementChild, mode, { send: mode === 'connect' ? go : send, remove, removeFirst: removeHere });
       } else {
         actions.innerHTML = `<button type="button" class="ce-conn-go">${mode === 'send' ? 'Send to calculator' : 'Connect your calculator'}</button>`;
         actions.firstElementChild.onclick = go;
@@ -1278,13 +1315,16 @@ function watchMenus() {
 // A split button's halves: the main one is what the student can do now, the
 // arrow offers the rest. 'download' (no calculator yet), 'send', or 'delete'
 // (the game is on the calculator: Send again comes first under the arrow).
-function splitHtml(mode, { href, label, dl = '' }) {
+// `remove`: before a calculator is connected ('connect', 'download'), Delete
+// from calculator comes last under the arrow (removeFirst).
+function splitHtml(mode, { href, label, dl = '', remove = false }) {
   const button = 'wp-block-button__link no-border-radius';
   const download = `<a role="menuitem" href="${href}"${downloadLinkAttrs()}>${esc(dl || 'Download file')}</a>`;
+  const removeItem = remove ? '<button type="button" role="menuitem" class="ce-split-remove">Delete from calculator</button>' : '';
   const [main, items] = {
-    connect: [`<button type="button" class="${button} ce-split-main">Connect your calculator</button>`, download],
+    connect: [`<button type="button" class="${button} ce-split-main">Connect your calculator</button>`, download + removeItem],
     download: [`<a class="${button} ce-split-main" href="${href}"${downloadLinkAttrs()}>Download</a>`,
-      '<button type="button" role="menuitem" class="ce-split-send">Send to calculator</button>'],
+      '<button type="button" role="menuitem" class="ce-split-send">Send to calculator</button>' + removeItem],
     send: [`<button type="button" class="${button} ce-split-main">Send to calculator</button>`, download],
     delete: [`<button type="button" class="${button} ce-split-main ce-danger" aria-label="Delete ${esc(label)} from calculator">Delete</button>`,
       `<button type="button" role="menuitem" class="ce-split-send">${esc(SEND_AGAIN.text)}</button>${download}`],
@@ -1294,8 +1334,9 @@ function splitHtml(mode, { href, label, dl = '' }) {
     + `<div class="ce-split-menu" role="menu" hidden>${items}</div>`;
 }
 
-// `send` and `remove` run the card's send and its Delete.
-function wireSplit(split, mode, { send, remove }) {
+// `send` and `remove` run the card's send and its Delete, `removeFirst` the
+// menu's Delete from calculator.
+function wireSplit(split, mode, { send, remove, removeFirst: first }) {
   const arrow = split.querySelector('.ce-split-arrow');
   const menu = split.querySelector('.ce-split-menu');
   arrow.onclick = () => {
@@ -1306,6 +1347,7 @@ function wireSplit(split, mode, { send, remove }) {
   };
   if (mode !== 'download') split.querySelector('.ce-split-main').onclick = mode === 'delete' ? remove : send;
   split.querySelector('.ce-split-send')?.addEventListener('click', send);
+  split.querySelector('.ce-split-remove')?.addEventListener('click', first);
 }
 
 function mountHub() {
@@ -1384,6 +1426,8 @@ function mountSplit(card, a) {
     else run({ file, label, say, show });
   };
   const remove = () => removeGame({ file, label, say, show });
+  // Not for an app card: its own module says whether it is there.
+  const removeHere = () => removeFirst({ file, label, say, show, fetchGame: page === 'math', failed: err => show(`<p>${errorHtml(err)}</p>`, 'bad') });
   status.addEventListener('click', e => {
     if (e.target.closest('.ce-close')) show('', '');
     else if (e.target.closest('.ce-send-again')) send();
@@ -1400,8 +1444,8 @@ function mountSplit(card, a) {
     if (want !== mode) {
       mode = want;
       split.classList.toggle('is-delete', mode === 'delete');
-      split.innerHTML = splitHtml(mode, { href, label });
-      wireSplit(split, mode, { send, remove });
+      split.innerHTML = splitHtml(mode, { href, label, remove: deleteOn() && !app });
+      wireSplit(split, mode, { send, remove, removeFirst: removeHere });
     }
     // The connect on load opens the calculator too: a click then would open it twice.
     split.querySelectorAll('button').forEach(b => { b.disabled = busy || connecting; });
