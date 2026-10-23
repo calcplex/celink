@@ -70,7 +70,7 @@ const WALKS = {
       'Once the calculator has restarted, press <kbd>apps</kbd>, then arrow to AsmHook2.',
       'Press <kbd>enter</kbd>.',
     ],
-    done: 'It reports Installation successful.',
+    done: 'It reports Installation successful. Press <kbd>clear</kbd> until the home screen shows, or the calculator won\'t take the game.',
   },
   'ce-jb-v3-game': GAME_WALK,
   'ce-jb-native-game': GAME_WALK,

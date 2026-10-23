@@ -26,7 +26,7 @@
 // words painted first here, so nothing pops in when this loads; where
 // this would not mount, <html> is ce-nosend and the panel shows a one-line note.
 import {
-  PROGRAMS, sendGame, collectEntries, deleteGame, freeRamAgain, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
+  PROGRAMS, sendGame, collectEntries, checkSpace, planInstall, deleteGame, freeRamAgain, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
   unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete,
 } from './gamesend.mjs';
 import {
@@ -34,7 +34,7 @@ import {
   jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
   feedbackText, sendFeedback, startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
   rateParams, ratedNote, ratedStars, rememberRating, rememberRatingNote, rememberSend, sentAgo, evoAddress, evoHtml, evoText, isEvoDevice,
-  openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, sendOutcome, stallLog, stallText, stallDetail, modal,
+  openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, baseOf, needsAsm, sendOutcome, stallLog, stallText, stallDetail, modal,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 
@@ -547,7 +547,8 @@ function verdict(c, where) {
   const os = `OS ${esc(shortOs(c.os))}`;
   if (page === 'math') return `${connected(os)}. ${where}`;
   switch (jailbreakState(c.route, c.tools)) {
-    case 'none': return `${connected(os)}. ${where}`;
+    // No jailbreak on 5.4 and earlier, so no A: say how games start there.
+    case 'none': return `${connected(os)}. ${where} ${needsAsm(c.os) ? 'No jailbreak needed: games start through Asm( on this version.' : `No jailbreak needed: games start from the ${keyHelpHtml('ce')} menu.`}`;
     case 'found': return `${connected(`${os}, jailbroken`)}. ${where} ${c.route === 'v21' ? `Games start from ${keyHelpHtml('ce')}, then A.` : `Games start from the ${keyHelpHtml('ce')} menu.`}`;
     case 'shell': return `${connected(`${os}, jailbroken`)}. ${where} Games start from ${esc(shellLabel(c.route, c.tools))}.`;
     case 'missing': return `${connected(os)}. It needs a jailbreak before games will run: ${jailbreakLink('jailbreak it first')}, then come back and send games.`;
@@ -626,6 +627,8 @@ async function run({ file, label, say, show }) {
         archive: archiveMode(page, main?.name),
         launchRam: await launchRam,
         parts: partsOf(listed, main?.name),
+        // A game with parts that does not fit even without them is refused with its smallest install's figures.
+        base: baseOf(listed, main?.name),
         onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); },
         // The calculator shows "Defragmenting..." meanwhile; the next progress replaces this.
         onBusy: () => say(DEFRAG_TEXT, pct),
@@ -1253,7 +1256,7 @@ function mountGame() {
   listeners.add(paint);
   changed();
   demoFeedback(show, label);
-  demoSent(show, label);
+  demoSent(show, label, file);
 }
 
 const ARROW = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -1421,7 +1424,7 @@ function mountSplit(card, a) {
   paint();
   if (card === document.querySelector('.wp-block-media-text')) {
     demoFeedback(show, label);
-    demoSent(show, label);
+    demoSent(show, label, file);
   }
 }
 
@@ -1436,10 +1439,31 @@ function demoFeedback(show, label) {
 // ?sent=partial1, partial2, added or addedsome on localhost paints a finished
 // send of the first game with optional parts (one or two parts left out, a
 // Send again that added the rest or only some of it) without a calculator, to
-// look at the Sent message.
-async function demoSent(show, label) {
-  const m = PREVIEW_HOST && /[?&]sent=(partial1|partial2|added|addedsome)\b/.exec(location.search);
+// look at the Sent message. ?sent=asm paints this card's game sent to an
+// OS 5.2 calculator (no jailbreak, started through Asm(), with its "Game
+// didn't start?" panel; ?sent=refused paints the refusal its Send gives with
+// 700 KB of archive free, worked out by the sender's own planInstall and
+// checkSpace (a game with parts: the smallest install's figures).
+async function demoSent(show, label, file) {
+  const m = PREVIEW_HOST && /[?&]sent=(partial1|partial2|added|addedsome|asm|refused)\b/.exec(location.search);
   if (!m) return;
+  if (m[1] === 'asm' || m[1] === 'refused') {
+    const entries = collectEntries(await bundle(file, label));
+    const main = entries.filter(e => PROGRAMS.includes(e.type)).at(-1);
+    if (m[1] === 'asm') {
+      show(sentHtml({ os: '5.2.2.0043', route: 'native', warnings: [] }, main, true, { tools: [] }), 'ok');
+      return;
+    }
+    const listed = await partsNow();
+    const optional = new Set(partsOf(listed, main?.name).flatMap(part => part.names));
+    const plan = planInstall(entries.filter(e => !optional.has(e.name)), { rows: [], archiveFree: 700 * 1024, ramFree: 150000, archive: archiveMode(page, main?.name) });
+    try {
+      checkSpace(plan, optional.size ? { least: baseOf(listed, main?.name) || true } : {});
+    } catch (err) {
+      show(`<p>${errorHtml(err)}</p>`, 'bad');
+    }
+    return;
+  }
   const listed = await partsNow();
   const name = Object.keys(listed)[0];
   const labels = partsOf(listed, name).map(p => p.label);

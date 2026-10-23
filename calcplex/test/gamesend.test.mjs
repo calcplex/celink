@@ -425,3 +425,32 @@ test('identify reports whether the calculator is on its home screen', async () =
   await link.ready();
   assert.equal(typeof (await identify(link)).home, 'boolean');
 });
+
+// OS 5.2 and earlier run a program only from RAM: there every program goes to
+// RAM, even one whose file asks for archive.
+test('below 5.3, \'programs\' puts every program in RAM, even one its file archives', async () => {
+  const prog = makeEntry({ name: 'GAME', type: TYPE.PROTECTED_PROGRAM, body: new Uint8Array(300), archived: true });
+  const data = makeEntry({ name: 'DATA', type: TYPE.APPVAR, body: new Uint8Array(300), archived: true });
+  const { steps } = planInstall([data, prog], { rows: [], archive: 'programs-ram' });
+  assert.deepEqual(steps.map(s => [s.entry.name, s.archived]), [['DATA', true], ['GAME', false]]);
+  const sim = new SimulatedCalculator({ os: OS.early });
+  const link = CELink.fromDevice(sim, { timeout: 500, streamTimeout: 4000 });
+  await link.open();
+  const r = await sendGame(link, [buildFile([data, prog])], { verify: 'size', archive: 'programs' });
+  assert.deepEqual(r.archived, ['DATA']);
+  assert.equal(sim.get('GAME', TYPE.PROTECTED_PROGRAM).archived, false);
+});
+
+// A game with optional parts that does not fit even without them is refused
+// with its smallest install's figures and the real shortfall.
+test('checkSpace least: names the smallest install and how much to free', () => {
+  const big = makeEntry({ name: 'CORE', type: TYPE.APPVAR, body: new Uint8Array(60000), archived: true });
+  const plan = planInstall([big], { rows: [], archiveFree: 100 * 1024, archive: 'all' });
+  const need = Math.ceil((plan.space.arcNeed + plan.space.arcReserve) / 1024);
+  const err = (() => { try { checkSpace(plan, { least: 'the first world' }); } catch (e) { return e; } })();
+  assert.equal(err.code, 'NO_ARCHIVE_SPACE');
+  assert.equal(err.least, true);
+  assert.equal(err.needKB, need - 100);
+  assert.equal(err.message, `Not enough room on the calculator: even with only the first world, this game needs ${need} KB of archive and there's 100 KB free. Delete about ${need - 100} KB of programs you don't need (2nd, +, 2: Mem Management), then try again.`);
+  assert.match((() => { try { checkSpace(plan, { least: true }); } catch (e) { return e.message; } })(), /^Not enough room on the calculator: even its smallest install needs /);
+});

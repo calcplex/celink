@@ -89,7 +89,7 @@ export function launchesArchived(version) {
 export function startHint(version, name) {
   if (compatibility(version) === 'v21') return `Press prgm, run A, and pick ${name}.`;
   // The home screen line is Asm(prgmNAME, with no closing parenthesis.
-  if (needsAsm(version)) return `Start it with Asm(: press 2nd, 0, pick Asm(, press prgm, pick ${name}, and press enter.`;
+  if (needsAsm(version)) return `Start it with Asm(: press 2nd, then 0 to open the catalog, scroll down to Asm( and press enter, then press prgm, pick ${name}, and press enter.`;
   return `Press prgm, pick ${name}, and press enter twice.`;
 }
 
@@ -393,7 +393,9 @@ export function startHelpAnswer(route, choice, { os, name, jb, shell: shellName 
       other: () => sentences(RESEND, ['Still stuck? ', ...FOLLOW_INSTALLER]),
     },
     native: {
-      error: () => sentences(startHint(os, name), MEMORY_FIX),
+      // 5.2 and earlier run only from RAM: a copy in archive (sent another
+      // way, or by an older version of this page) says ERROR: ARCHIVED.
+      error: () => sentences(startHint(os, name), ...(needsAsm(os) ? [['If it says ARCHIVED, ', SEND_AGAIN, ' puts it back in RAM.']] : []), MEMORY_FIX),
       not_listed: notListed,
       // No jailbreak on this route, so never the installer.
       other: () => sentences(RESEND),
@@ -805,9 +807,9 @@ export const ARCHIVE_ALL_APPVARS = ['AGD'];
 /**
  * sendGame's `archive` mode for a page and the game's main program `main`.
  * Every page (hub, game pages, the installer, the math page) puts programs in
- * archive where the OS starts archived programs, and below that keeps each
- * file's own flag. A game in ARCHIVE_ALL_APPVARS gets 'programs+appvars': its
- * AppVars go to archive too, on the same OSes. `page` stays an argument so a
+ * archive where the OS starts archived programs, and below that puts every
+ * program in RAM (sendGame's 'programs-ram'). A game in ARCHIVE_ALL_APPVARS
+ * gets 'programs+appvars': its AppVars go to archive too, on the same OSes. `page` stays an argument so a
  * page can differ again.
  */
 export function archiveMode(page, main = null) {
@@ -829,6 +831,11 @@ export function partsOf(list, main) {
   const ok = g && typeof g.base === 'string' && Array.isArray(g.parts) && g.parts.length
     && g.parts.every(p => p && typeof p.label === 'string' && Array.isArray(p.names) && p.names.length && p.names.every(n => typeof n === 'string'));
   return ok ? g.parts : [];
+}
+
+/** What a game's required files hold (the list's `base`, 'the first world' say), for a game partsOf covers; otherwise null. */
+export function baseOf(list, main) {
+  return partsOf(list, main).length ? list[main].base : null;
 }
 
 /** Labels as a sentence takes them: 'a', 'a and b', 'a, b and c'. */

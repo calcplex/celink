@@ -48,7 +48,7 @@ test('Asm( is needed on 5.2 and earlier only', () => {
 
 test('startHint: Asm( on 5.2 and earlier, the arTIfiCE shell on v2.1, prgm otherwise', () => {
   for (const v of ['5.0.0.0089', '5.2.2.0043']) {
-    assert.equal(startHint(v, 'SNAKE'), 'Start it with Asm(: press 2nd, 0, pick Asm(, press prgm, pick SNAKE, and press enter.');
+    assert.equal(startHint(v, 'SNAKE'), 'Start it with Asm(: press 2nd, then 0 to open the catalog, scroll down to Asm( and press enter, then press prgm, pick SNAKE, and press enter.');
   }
   for (const v of ['5.3.0.0037', '5.4.0.0034', '5.8.5.0074']) {
     assert.equal(startHint(v, 'SNAKE'), 'Press prgm, pick SNAKE, and press enter twice.');

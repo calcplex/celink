@@ -444,13 +444,15 @@ export function ramToStart(entries, launchRam = null) {
  * calculator's listing; `archive` is 'file' (each variable where its file
  * says), 'programs' (every program archived, the rest where its file says),
  * 'programs+appvars' (every program and AppVar archived, the rest where its
- * file says) or 'all' (every variable archived). `launchRam` as ramToStart
- * takes it.
+ * file says), 'programs-ram' (every program in RAM, the rest where its file
+ * says: OS 5.2 and earlier, which cannot run an archived program) or 'all'
+ * (every variable archived). `launchRam` as ramToStart takes it.
  */
 export function planInstall(entries, { rows, ramFree = null, archiveFree = null, archive = 'file', launchRam = null }) {
   const steps = entries.map(e => {
     const remove = rows.filter(r => clash(r, e));
-    const archived = archive === 'all' || !!e.archived
+    const archived = archive === 'programs-ram' && PROGRAMS.includes(e.type) ? false
+      : archive === 'all' || !!e.archived
       || ((archive === 'programs' || archive === 'programs+appvars') && PROGRAMS.includes(e.type))
       || (archive === 'programs+appvars' && e.type === TYPE.APPVAR);
     return { entry: e, archived, remove, reason: remove.length ? 'replace' : 'new' };
@@ -491,10 +493,20 @@ export function planInstall(entries, { rows, ramFree = null, archiveFree = null,
   return { steps, space, warnings };
 }
 
-/** Refuse a plan that does not fit, naming how much to free. `what` names what was being sent. */
-export function checkSpace({ space }, { what = 'this game' } = {}) {
+/**
+ * Refuse a plan that does not fit, naming how much to free. `what` names what
+ * was being sent. `least`: the plan is a game's smallest install (its required
+ * files, every optional part left out), so the words say so and name the
+ * archive to free for it; a string names what that install holds ('the first
+ * world', say), true says only that it is the smallest.
+ */
+export function checkSpace({ space }, { what = 'this game', least = null } = {}) {
   const { ramNeed, arcNeed, arcReserve = 0, ramFree, archiveFree, ramShort } = space;
   const arcRoom = arcNeed + arcReserve;
+  if (archiveFree != null && arcRoom > archiveFree && least) {
+    const lead = typeof least === 'string' ? `even with only ${least}, ${what} needs` : `even its smallest install needs`;
+    throw refusal('NO_ARCHIVE_SPACE', `Not enough room on the calculator: ${lead} ${kb(arcRoom)} KB of archive and there's ${Math.floor(archiveFree / 1024)} KB free. Delete about ${kb(arcRoom - archiveFree)} KB of programs you don't need (2nd, +, 2: Mem Management), then try again.`, { needKB: kb(arcRoom - archiveFree), least: true });
+  }
   if (archiveFree != null && arcRoom > archiveFree) {
     throw refusal('NO_ARCHIVE_SPACE', `Not enough room on the calculator: ${what} needs ${kb(arcRoom)} KB of archive and there's ${Math.floor(archiveFree / 1024)} KB free. Delete a few programs you don't need (2nd, +, 2: Mem Management), then try again.`, { needKB: kb(arcRoom - archiveFree) });
   }
@@ -514,10 +526,11 @@ export function checkSpace({ space }, { what = 'this game' } = {}) {
 // whole send is refused for archive, parts are left out from the end until
 // what is left fits, RAM included. Every file no part names is required. A
 // send refused for RAM is refused as before, and so is one whose required
-// files do not fit: with the whole send's figures, or with `what` given,
-// with the required files' figures under that name. Also returns the parts
-// left out.
-async function planThatFits(link, todo, calc, archive, launchRam, parts = [], { what = null, listed = null } = {}) {
+// files do not fit, with the required files' figures: under `what` when
+// given (a top-up), otherwise as the game's smallest install (`base` names
+// what it holds), so the refusal names the least archive to free, not the
+// whole game's. Also returns the parts left out.
+async function planThatFits(link, todo, calc, archive, launchRam, parts = [], { what = null, listed = null, base = null } = {}) {
   const plan = async ({ ramFree, archiveFree }, rows = null, entries = todo) => {
     rows ??= await link.list();
     return { ...planInstall(entries, { rows, ramFree, archiveFree, archive, launchRam }), rows };
@@ -545,6 +558,7 @@ async function planThatFits(link, todo, calc, archive, launchRam, parts = [], { 
         if (fits(smaller)) return { plan: smaller, leftOut: parts.slice(k) };
       }
       if (what) checkSpace(smaller, { what });
+      if (parts.length) checkSpace(smaller, { least: base || true });
       throw err;
     }
   };
@@ -603,9 +617,11 @@ async function roomToAdd(link, entries, archive, plan) {
  *   archive                  'file' stores each variable where its file says; 'programs' puts
  *                            every program in archive on an OS that starts archived programs
  *                            (5.3.0 and later) and stores everything else where its file says,
- *                            and below 5.3 is 'file'; 'programs+appvars' is 'programs' with
- *                            every AppVar archived too, and below 5.3 is also 'file'; 'all'
- *                            archives all
+ *                            and below 5.3 is 'programs-ram': every program in RAM, even one
+ *                            its file archives (5.2 and earlier give ERR:ARCHIVED for an
+ *                            archived program), the rest where its file says;
+ *                            'programs+appvars' is 'programs' with every AppVar archived too,
+ *                            and below 5.3 is also 'programs-ram'; 'all' archives all
  *   launchRam                measured free RAM to start, as ramToStart takes it
  *   parts                    the game's optional parts in sending order, [{ label, names }]:
  *                            when the whole game does not fit in archive, as many as fit, from
@@ -613,6 +629,9 @@ async function roomToAdd(link, entries, archive, plan) {
  *                            game with some parts missing (partsToAdd), only the libraries and
  *                            the missing parts go, as many as fit, and a refusal names the
  *                            first missing part
+ *   base                     with parts: what the required files hold ('the first world'), for a
+ *                            refusal when not even they fit, which names their archive (the
+ *                            least to free) instead of the whole game's
  * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked, verify,
  * added, leftOut, addKB, defrag }: `added` the labels of the parts a send that only added parts
  * sent (otherwise []), `leftOut` those of the parts not sent (none: []), and with any,
@@ -623,7 +642,7 @@ async function roomToAdd(link, entries, archive, plan) {
  * calculator refused for space may still be listed, empty, under its name;
  * one this send created is deleted again and named in `emptied`.
  */
-export async function sendGame(openLink, files, { onProgress = null, onStep = null, onBusy = null, verify = 'full', archive = 'file', launchRam = null, parts = [] } = {}) {
+export async function sendGame(openLink, files, { onProgress = null, onStep = null, onBusy = null, verify = 'full', archive = 'file', launchRam = null, parts = [], base = null } = {}) {
   const todo = collectEntries(files);
   const link = readyEach(openLink);
   const calc = await identify(link);
@@ -631,14 +650,15 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   if (asm && (calc.route === 'unsupported' || calc.route === 'unknown')) {
     throw refusal('NO_JAILBREAK', `There's no jailbreak for OS ${calc.os} yet, so this game can't run on it. Nothing was sent.`);
   }
-  const mode = (archive === 'programs' || archive === 'programs+appvars') && !launchesArchived(calc.os) ? 'file' : archive;
+  // 5.2 and earlier run a program only from RAM, so there every program goes to RAM.
+  const mode = (archive === 'programs' || archive === 'programs+appvars') && !launchesArchived(calc.os) ? 'programs-ram' : archive;
   // A game already there with parts missing gets only those, with the libraries.
   const rows = parts?.length ? await link.list() : null;
   const missing = partsToAdd(todo, parts, rows);
   const adding = missing ? new Set(missing.flatMap(part => part.names)) : null;
   const { plan, rechecked, leftOut } = missing
     ? await planThatFits(link, todo.filter(e => library(e) || adding.has(e.name)), calc, mode, launchRam, missing.slice(1), { what: missing[0].label, listed: rows })
-    : await planThatFits(link, todo, calc, mode, launchRam, parts ?? [], { listed: rows });
+    : await planThatFits(link, todo, calc, mode, launchRam, parts ?? [], { listed: rows, base });
   const total = plan.steps.reduce((n, s) => n + s.entry.data.length, 0);
   let before = 0, sending = null, defrag = false;
   const busy = () => { defrag = true; onBusy?.(); };
