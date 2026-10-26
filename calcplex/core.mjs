@@ -516,14 +516,58 @@ export function isCE(productName) {
   return /^TI-84 ?\+ ?CE|^TI-84 Plus CE/.test(productName);
 }
 
+// The product name (parameter 0x0002) the CE's boot code and OS answer when
+// the calculator's certificate holds no product name field. They answer the
+// product number (0x0001) as the constant 0x13 either way, so a CE still
+// says it is a CE.
+export const NO_CERT_NAME = 'NoCertProductName';
+const CE_PRODUCT_NUMBER = 0x13;
+const CE_USB_PRODUCT_ID = 0xE008;
+
+/**
+ * A TI-84 Plus CE whose certificate has no product name: NO_CERT_NAME,
+ * product number 0x13, an OS 5 version, and, when `usbProductId` is given,
+ * the CE's USB product id. The TI-84 Plus, Plus SE and Plus C SE answer other
+ * product numbers and run OS 2 to 4.
+ *
+ * So this is almost always a TI-84 Plus CE, not always: a TI-83 Premium CE
+ * without the field also answers 0x13 (and e008) and passes. tilibs tells
+ * the two apart with parameter 0x004B (exact_math, nonzero on an 83 Premium
+ * CE), which info() does not request: asking for it would change the request
+ * every connect sends, for every calculator.
+ */
+export function unnamedCE({ productName, productNumber, osVersion, usbProductId } = {}) {
+  return productName === NO_CERT_NAME && productNumber === CE_PRODUCT_NUMBER
+    && /^5\.\d+\.\d+/.test(osVersion ?? '')
+    && (usbProductId === undefined || usbProductId === CE_USB_PRODUCT_ID);
+}
+
+/**
+ * True for the installer's refusal of a calculator that gave no model name
+ * (NO_CERT_NAME) and failed unnamedCE: it may well be a CE, so the manual
+ * installation (TI Connect CE) stays offered, unlike for a named wrong model.
+ */
+export function unreadModel(err) {
+  return err?.code === 'WRONG_MODEL' && err.model === NO_CERT_NAME;
+}
+
+/** The model as a page shows it: NO_CERT_NAME is never shown. */
+export function modelLabel(model) {
+  return model === NO_CERT_NAME ? 'TI-84 Plus CE' : model;
+}
+
 /**
  * The installer's model and version gate: { model, os, route }. Stricter
  * than isCE: only the two names a TI-84 Plus CE reports, with or without
- * " USB", since a route is chosen for exactly that model.
+ * " USB", since a route is chosen for exactly that model, or a CE with no
+ * name (unnamedCE, given `productNumber` and `usbProductId`). `model` stays
+ * as the calculator gave it.
  */
-export function checkCalculator(model, os) {
-  if (!/^TI-84(?:\+| Plus )CE(?: USB)?$/.test(model)) {
-    throw refusal('WRONG_MODEL', `Detected ${model || 'an unknown model'}. Connect a TI-84 Plus CE.`, { model });
+export function checkCalculator(model, os, { productNumber, usbProductId } = {}) {
+  const named = /^TI-84(?:\+| Plus )CE(?: USB)?$/.test(model);
+  if (!named && !unnamedCE({ productName: model, productNumber, osVersion: os, usbProductId })) {
+    const text = model === NO_CERT_NAME ? 'Could not read which calculator this is.' : `Detected ${model || 'an unknown model'}.`;
+    throw refusal('WRONG_MODEL', `${text} Connect a TI-84 Plus CE.`, { model });
   }
   if (!/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(os)) throw refusal('NO_OS_VERSION', 'Could not read an exact OS version. No files will be sent.');
   return { model, os, route: compatibility(os) };

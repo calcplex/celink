@@ -10,9 +10,9 @@ import { CETransport } from './transport.mjs';
 import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
   INEQUALZ_URL, LEAVE_SHELL_KEY, OFFICIAL, PREVIEW_HOST, ROUTES, RUNNING_TEXT, TICONNECT_URL, archiveMode, calcParams, compatibility, esc,
-  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, installerReturn, isChromeOS, isWindows, keyHelpHtml, linkDead, mountKeyHelp,
+  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, installerReturn, isChromeOS, isWindows, keyHelpHtml, linkDead, modelLabel, mountKeyHelp,
   needsAsm, officialFiles, openDetail, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable, startHint,
-  stepTracker, tabHandoff, track, trackConnectFail, unknownRefusal, TAB_BUSY_TEXT,
+  stepTracker, tabHandoff, track, trackConnectFail, unknownRefusal, unreadModel, TAB_BUSY_TEXT,
 } from './core.mjs';
 import { CELinkError } from '../celink.mjs';
 
@@ -320,6 +320,8 @@ function progress() {
 // a failure the manual installation can't fix either: an Evo, a calculator
 // that isn't a CE, a low battery, another tab busy with it, a program left
 // running. A version arTIfiCE doesn't cover has no manual route either.
+// One wrong_model keeps it: a calculator that gave no model name
+// (unreadModel), which is almost always a CE TI Connect CE can still reach.
 const NO_MANUAL = ['evo', 'no_webusb', 'other_model', 'wrong_model', 'low_battery', 'tab_busy'];
 function showManual(on) {
   const a = root()?.querySelector('.cec-manual');
@@ -469,7 +471,7 @@ function fail(err) {
       || (unknownRefusal(err) ? retryText(err.calcError) : null) || refusalText(err) || err?.message || String(err);
   }
   el.hidden = false;
-  showManual(state.deadEnd || !(programRunning(err) || NO_MANUAL.includes(reason)));
+  showManual(state.deadEnd || !(programRunning(err) || (NO_MANUAL.includes(reason) && !unreadModel(err))));
   say('');
 }
 
@@ -498,7 +500,7 @@ async function work(fn) {
 function factsBlock({ reason = true } = {}) {
   const i = state.info;
   return `<div class="cec-facts"><dl>
-    <dt>Calculator</dt><dd>${esc(i.model)}</dd>
+    <dt>Calculator</dt><dd>${esc(modelLabel(i.model))}</dd>
     <dt>Software version</dt><dd>${esc(i.os)}</dd>
     <dt>What it needs</dt><dd>${esc(ROUTES[i.route].label)}</dd>
   </dl>${reason ? `<p class="cec-why">${esc(ROUTES[i.route].reason)}</p>` : ''}</div>`;

@@ -59,7 +59,7 @@ export class CETransport {
       return freeRamAgain(link, first);
     });
     this.info = {
-      ...checkCalculator(calc.productName, calc.osVersion), home: calc.atHomescreen, ramFree: calc.ramFree, archiveFree: calc.archiveFree,
+      ...checkCalculator(calc.productName, calc.osVersion, { productNumber: calc.productNumber, usbProductId: this.device?.productId }), home: calc.atHomescreen, ramFree: calc.ramFree, archiveFree: calc.archiveFree,
       ...(calc.reread ? { reread: true } : {}),
     };
     return this.info;

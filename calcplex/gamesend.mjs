@@ -4,7 +4,7 @@
 // Sending a game to a TI-84 Plus CE: every file of it, every time, libraries
 // first, after a space check, with each variable read back. The pages own the
 // words on screen; this module owns what goes over the cable.
-import { NAMED, compatibility, digest, isCE, isEvoDevice, launchesArchived, programRunning, refusal } from './core.mjs';
+import { NAMED, NO_CERT_NAME, compatibility, digest, isCE, isEvoDevice, launchesArchived, programRunning, refusal, unnamedCE } from './core.mjs';
 import { CELink } from '../celink.mjs';
 import { parseFile, TYPE } from '../tifiles.mjs';
 
@@ -133,8 +133,10 @@ export function readyEach(link) {
 /** { model, os, route, ramFree, archiveFree }, refusing anything but a CE. */
 export async function identify(link) {
   const info = await link.info();
-  if (!isCE(info.productName)) {
-    throw refusal('OTHER_MODEL', `This is a ${info.productName || 'calculator this page does not know'}. These files are for the TI-84 Plus CE.`, { model: info.productName });
+  // The USB id too, so this gate matches the installer's (checkCalculator).
+  if (!isCE(info.productName) && !unnamedCE({ ...info, usbProductId: link.device?.productId })) {
+    const shown = info.productName !== NO_CERT_NAME && info.productName;
+    throw refusal('OTHER_MODEL', `This is a ${shown || 'calculator this page does not know'}. These files are for the TI-84 Plus CE.`, { model: info.productName });
   }
   return {
     model: info.productName, os: info.osVersion, route: compatibility(info.osVersion),
