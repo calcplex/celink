@@ -1335,6 +1335,8 @@ const PAGE_REASONS = new Map([
   ['WRONG_ROUTE', 'wrong_route'],
   ['WRONG_MODEL', 'wrong_model'],
   ['TAB_BUSY', 'tab_busy'],
+  // The installer's check before a send: a program was running, nothing sent.
+  ['RUNNING_BEFORE', 'running_before'],
 ]);
 
 /** The `reason` an analytics event gives any error. */

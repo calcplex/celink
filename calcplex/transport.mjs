@@ -3,10 +3,10 @@
 //
 // The jailbreak installer's side of celink: one calculator, the collision
 // rules, and a read-back after every send.
-import { NAMED, checkCalculator, digest, linkDead, officialFiles, parseFlashApp, parseVariable, refusal, sameVariable } from './core.mjs';
+import { NAMED, PROGRAM_RUNNING, checkCalculator, digest, linkDead, officialFiles, parseFlashApp, parseVariable, refusal, sameVariable } from './core.mjs';
 import { freeRamAgain, readyEach } from './gamesend.mjs';
 import { CELink } from '../celink.mjs';
-import { buildFile, parseAppFile, parseFile } from '../tifiles.mjs';
+import { TYPE, buildFile, parseAppFile, parseFile } from '../tifiles.mjs';
 
 const clashes = (rows, name) => rows.filter(r => r.name === name && NAMED.includes(r.type));
 
@@ -162,6 +162,27 @@ export class CETransport {
       if (spec?.expectReboot && linkDead(err)) return null;
       throw err;
     }
+  }
+
+  /**
+   * Whether a program is running on the calculator, before any key is
+   * pressed: then a key could land in that program instead of on the home
+   * screen. A running program refuses a delete with 0x0036 whether or not
+   * the variable exists (observed on hardware, a TI-Basic program at Input
+   * and a shell alike), so this deletes a name the listing just showed is
+   * not there. Resolves { running, rows }.
+   */
+  async busyCheck() {
+    const rows = await this.directory();
+    const name = ['CELNKKEY', 'CELNKKY2', 'CELNKKY3'].find(n => !clashes(rows, n).length);
+    if (!name) return { running: false, rows };
+    try {
+      await this.#exchange(link => link.delete(name, TYPE.PROGRAM));
+    } catch (err) {
+      if (err?.code === 'CALC_ERROR' && err.calcError === PROGRAM_RUNNING) return { running: true, rows };
+      if (err?.code !== 'CALC_ERROR') throw err;
+    }
+    return { running: false, rows };
   }
 
   /**

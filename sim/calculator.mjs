@@ -21,6 +21,10 @@ export const SIM_ERR = Object.freeze({
   NO_MODE: 0x0001, // seen on hardware; that the host had not pinged the mode is inferred
   READ_REFUSED: 0x0006, NO_MEMORY: 0x000C, PING_TOO_SMALL: 0x001C, PING_TOO_BIG: 0x001D, BATTERY_LOW: 0x002B, BAD_SIGNATURE: 0x002E,
   PROGRAM_RUNNING: 0x0036,
+  // An OS transfer, as TI's boot code 5.1.5 answered in an emulator: the
+  // normal mode and parameters refused while waiting for an OS, and an OS
+  // older than the calculator allows refused at its header.
+  BOOT_MODE: 0x0009, NO_PARAMS: 0x0020, OS_REFUSED: 0x0019,
   WRONG_MODE: 0x7F02, BAD_PACKET: 0x7F03, NOT_FOUND: 0x7F04, UNSUPPORTED: 0x7F06,
   BAD_NAME: 0x7F07, BAD_MODE: 0x7F08, OUT_OF_ORDER: 0x7F09,
 });
@@ -31,7 +35,7 @@ const MODES = {
   '000300010000': [0x0001, 0x0007, 0x0009, 0x000B, 0x000C, 0x000E, 0x0010, 0x0011],
 };
 /** The command each reply step answers, for `refuse`. */
-const STEPS = { 0x0001: 'mode', 0x0007: 'params', 0x0009: 'dir', 0x000B: 'rts', 0x000D: 'contents', 0x000C: 'request', 0x0010: 'delete' };
+const STEPS = { 0x0001: 'mode', 0x0002: 'begin', 0x0004: 'header', 0x0005: 'data', 0x0007: 'params', 0x0009: 'dir', 0x000B: 'rts', 0x000D: 'contents', 0x000C: 'request', 0x0010: 'delete', 0x0011: 'key' };
 // The owner bytes a type attribute may carry.
 const TYPE_PREFIXES = [0xF0030000, 0xF0070000, 0xF00B0000, 0xF00F0000];
 const PROGRAM_TYPES = [0x05, 0x06];
@@ -54,6 +58,44 @@ function concat(...parts) {
     else { out.set(p, o); o += p.length; }
   }
   return out;
+}
+function bytesEqual(a, b) { return a.length === b.length && a.every((x, i) => x === b[i]); }
+function cmpVersion(a, b) {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  return 0;
+}
+/** The version an OS image names in its signed header (fields 0x80D0 and 0x8030), or null. */
+function simOSVersion(d) {
+  if (d.length < 6 || d[0] !== 0x80 || d[1] !== 0x0F) return null;
+  let v = null, build = null;
+  for (let p = 6; p + 2 <= d.length && p < 0x46 && d[p] === 0x80;) {
+    const id = (d[p] << 8) | d[p + 1];
+    const len = id & 0x0F;
+    if (len >= 0x0D) return null;
+    const f = d.subarray(p + 2, p + 2 + len);
+    if ((id & 0xFFF0) === 0x80D0) v = f;
+    if ((id & 0xFFF0) === 0x8030) build = f;
+    p += 2 + len;
+  }
+  if (!v || v.length < 3 || build?.length !== 2) return null;
+  return { major: v[2], minor: v[1], micro: v[0], build: build[0] | build[1] << 8, base: `${v[2]}.${v[1]}.${v[0]}` };
+}
+/** Without a real signature check: the image's body ends where it says and TI's signature fields follow. */
+function simOSSigned(d) {
+  if (d.length < 6 || d[0] !== 0x80 || d[1] !== 0x0F) return false;
+  let p = 6 + readBe32(d, 2);
+  let signed = false;
+  while (p + 2 <= d.length) {
+    const id = (d[p] << 8) | d[p + 1];
+    const n = id & 0x0F;
+    const w = { 0x0D: 1, 0x0E: 2, 0x0F: 4 }[n] ?? 0;
+    let len = w ? 0 : n;
+    for (let i = 0; i < w; i++) len = len * 256 + d[p + 2 + i];
+    if (id >> 8 === 0x02 && len >= 128) signed = true;
+    p += 2 + w + len;
+  }
+  return signed && p === d.length;
 }
 function hex(b) { return Array.from(b, x => x.toString(16).padStart(2, '0')).join(''); }
 function domError(name, message) { return Object.assign(new Error(message), { name }); }
@@ -120,8 +162,23 @@ export class SimulatedCalculator {
                                 // then the calculator stops answering until replugged, as observed on
                                 // hardware (OS 5.8.5); settable at any time (false = a RAM reset)
     running = false,            // a program running on the calculator; settable at any time
+    waitingForOS = false,       // no OS: an earlier OS transfer stopped after its header; settable
+    osChunk = 0x3EC,            // the OS Data packet size (address included) the calculator asks for
+    osMinimum = null,           // 'a.b.c': an older OS is refused at its header (the boot code's minimum)
+    osValid = null,             // (data) => bool: the signature check after an OS transfer; null checks
+                                // only that the image has TI's signature fields
+    osTiming = { headerDelay: 15000, eotDelay: 80000 }, // Delay Acknowledgements (us) seen in an emulator
+    runningKeys = 'refuse',     // what a key press meets while a program runs: 'refuse' (0x0036, as a
+                                // send does), 'queue' (taken, never acknowledged) or 'take' (taken and
+                                // acknowledged, as at the home screen, so the program gets it); not
+                                // observed on hardware, so tests try each
+    keyDelayUs = 1000,          // a Delay Acknowledgement before each key's acknowledgement, as
+                                // libticalcs expects one; null for none
     leftovers = [],             // raw packets { type, data } sent before the answer to the next Buffer Size
                                 // Request, as an earlier exchange might leave; never observed on hardware
+    screen = null,              // what a screenshot request gets: 153,600 bytes of RGB565 (little-endian,
+                                // row by row), a function returning them (called at each request), an
+                                // error code to refuse with, or null for a blank white screen; settable
   } = {}) {
     // The USBDevice surface, as observed on a CE.
     this.vendorId = 0x0451;
@@ -158,7 +215,16 @@ export class SimulatedCalculator {
     this.emptyOnFull = emptyOnFull;
     this.damagedVat = damagedVat;
     this.running = running;
+    this.waitingForOS = waitingForOS;
+    this.osChunk = osChunk;
+    this.osMinimum = osMinimum;
+    this.osValid = osValid;
+    this.osTiming = osTiming;
+    this.osInstalls = [];       // every OS that finished a transfer: { data, valid }
+    this.runningKeys = runningKeys;
+    this.keyDelayUs = keyDelayUs;
     this.leftovers = [...leftovers];
+    this.screen = screen;
     this.vars = new Map();
     for (const v of vars) this._store(v.name, v.type, v.data, !!v.archived, v.version ?? 0);
 
@@ -166,6 +232,13 @@ export class SimulatedCalculator {
     this.clearedHalts = [];     // clearHalt() calls: [direction, endpointNumber]
     this.log = [];              // every raw packet: { dir: 'out' (host to calculator) | 'in', bytes }
     this.commands = [];         // virtual packets received: { type, data }
+    this.keys = [];             // key codes taken, in order
+    this.queuedKeys = [];       // key codes taken while a program ran, never acknowledged
+    this.screenshots = 0;       // screenshot requests answered
+    // (code) => true after a key is taken and before it is acknowledged; true
+    // leaves it unacknowledged (a key that restarts the calculator calls
+    // dropLink() first)
+    this.onKey = null;
     this.wedged = false;        // after an oversize packet; only replug() clears it
     this.freeze = false;        // stops answering, as a hung calculator
     this.disconnected = false;  // reads and writes reject, as a calculator gone from the bus
@@ -179,6 +252,8 @@ export class SimulatedCalculator {
     this._rejectThisWrite = false;
     this._reboot = null;
     this._waiters = [];
+    this._afterAck = null;
+    this._os = null;
     this._resetLink();
   }
 
@@ -194,6 +269,12 @@ export class SimulatedCalculator {
   }
 
   /** Unplug and plug back in: the only thing that clears a wedge. */
+  /** Pull the cable: transfers reject until replug(). */
+  unplug() {
+    this.disconnected = true;
+    for (const w of this._waiters.splice(0)) w.reject(domError('NotFoundError', 'The calculator was reset or unplugged.'));
+  }
+
   replug() {
     Object.assign(this, { wedged: false, freeze: false, disconnected: false, _rejectThisWrite: false, _reboot: null });
     this._resetLink();
@@ -327,6 +408,7 @@ export class SimulatedCalculator {
     if (!this.running) return null;
     if (step === 'rts' || step === 'delete') return SIM_ERR.PROGRAM_RUNNING;
     if (step === 'request') return SIM_ERR.READ_REFUSED;
+    if (step === 'key' && this.runningKeys === 'refuse') return SIM_ERR.PROGRAM_RUNNING;
     return null;
   }
 
@@ -393,6 +475,11 @@ export class SimulatedCalculator {
         this._awaitingAck = null;
         if (acked.delayMs != null) this._delayUntil = performance.now() + acked.delayMs;
         this._release();
+        if (this._afterAck && !this._current && !this._awaitingAck && !this._queue.length) {
+          const then = this._afterAck;
+          this._afterAck = null;
+          then();
+        }
         if (this._stallPending && !this._current && !this._awaitingAck && !this._queue.length) {
           this._stallPending = false;
           this.freeze = true;
@@ -458,6 +545,9 @@ export class SimulatedCalculator {
     finish();
     return true;
   }
+
+  /** Leave the link as a restart does: 'silent', 'disconnect' or 'reject-write' (rebootWhenLands). */
+  dropLink(mode = 'disconnect') { this._dropLink(mode); }
 
   _dropLink(mode) {
     if (mode === 'reject-write') {
@@ -566,6 +656,9 @@ export class SimulatedCalculator {
       const refused = STEPS[type] !== 'contents' && (this._refusal(STEPS[type]) || this._runningRefusal(STEPS[type]));
       if (refused) return this._queueError(refused);
       if (type === 0x0001) return this._ping(d);
+      if (this.waitingForOS && type === 0x0007) return this._queueError(SIM_ERR.NO_PARAMS);
+      if (this.phase === 'os-header') return type === 0x0004 ? this._osHeader(d) : this._outOfOrder(type);
+      if (this.phase === 'os-data') return type === 0x0005 ? this._osData(d) : type === 0xDD00 ? this._osEot() : this._outOfOrder(type);
       if (this.mode == null) {
         this._violation(`Command 0x${type.toString(16)} was sent before the mode ping.`);
         return this._queueError(SIM_ERR.NO_MODE);
@@ -577,11 +670,13 @@ export class SimulatedCalculator {
         return this._queueError(SIM_ERR.WRONG_MODE);
       }
       switch (type) {
+        case 0x0002: return this._osBegin(d);
         case 0x0007: return this._paramRequest(d);
         case 0x0009: return this._dirList(d);
         case 0x000B: return this._rts(d);
         case 0x000C: return this._varRequest(d);
         case 0x0010: return this._delete(d);
+        case 0x0011: return this._execute(d);
         default: return this._queueError(SIM_ERR.UNSUPPORTED);
       }
     } catch (e) {
@@ -617,14 +712,93 @@ export class SimulatedCalculator {
     if (value < 2000) return this._queueError(SIM_ERR.PING_TOO_SMALL);
     if (value > 131071) return this._queueError(SIM_ERR.PING_TOO_BIG);
     if (!MODES[mode]) return this._queueError(SIM_ERR.BAD_MODE);
+    // Waiting for an OS, only the basic mode an OS transfer uses is taken.
+    if (this.waitingForOS && mode !== '000200010000') return this._queueError(SIM_ERR.BOOT_MODE);
     this.mode = mode;
     this.queueVirtual(0x0012, be32(value));
+  }
+
+  // ---- An OS transfer, as TI's boot code answered it in an emulator.
+
+  _osBegin(d) {
+    if (d.length !== 11 || d.subarray(0, 7).some(x => x !== 0)) return this._bad('Begin OS Transfer must be 7 zero bytes and a 4-byte size.');
+    const size = readBe32(d, 7);
+    // That the boot code checks the battery here is inferred; libticalcs never asks.
+    if (this.lowBattery) return this._queueError(SIM_ERR.BATTERY_LOW);
+    this._os = { size, data: new Uint8Array(size), received: 0 };
+    this.phase = 'os-header';
+    this.queueVirtual(0x0003, [...be32(this.osChunk), 0, 0, 0, 0]);
+  }
+
+  _osHeader(d) {
+    const os = this._os;
+    const v = simOSVersion(d);
+    if (d[0] !== 0x80 || d[1] !== 0x0F || !v) {
+      this.phase = 'idle';
+      return this._bad('The OS header does not start with a signed OS header (80 0F) that names its version.');
+    }
+    if (this.osMinimum && cmpVersion(v.base, this.osMinimum) < 0) {
+      // Refused before anything is erased: the calculator keeps its OS.
+      this.phase = 'idle';
+      this._os = null;
+      return this._queueError(SIM_ERR.OS_REFUSED);
+    }
+    os.header = d.slice();
+    os.version = v;
+    // From here the old OS is gone: a transfer that stops leaves a calculator waiting for one.
+    this.waitingForOS = true;
+    this.phase = 'os-data';
+    if (this.osTiming.headerDelay) this._queueDelay(this.osTiming.headerDelay);
+    this.queueVirtual(0x0003, [...be32(this.osChunk), 0, 0, 0, 0]);
+  }
+
+  _osData(d) {
+    const os = this._os;
+    if (d.length < 4) return this._bad('An OS Data packet is shorter than its address.');
+    const addr = (d[0] | d[1] << 8 | d[2] << 16 | d[3] << 24) >>> 0;
+    const chunk = d.subarray(4);
+    if (addr !== 0x30000 + os.received) return this._bad(`OS Data for address 0x${addr.toString(16)}; the next is 0x${(0x30000 + os.received).toString(16)}.`);
+    if (d.length > this.osChunk) return this._bad(`An OS Data packet of ${d.length} bytes; the calculator asked for ${this.osChunk}.`);
+    if (chunk.length === 0) this._violation('An empty OS Data packet (libticalcs\' last chunk when the size divides evenly); never seen by a CE.');
+    if (os.received + chunk.length > os.size) return this._bad('More OS data than Begin OS Transfer announced.');
+    os.data.set(chunk, os.received);
+    os.received += chunk.length;
+    this.queueVirtual(0xAA00, [0x00, 0x01]);
+  }
+
+  _osEot() {
+    const os = this._os;
+    if (os.received !== os.size) {
+      this.phase = 'idle';
+      return this._bad(`End of Transmission after ${os.received} of ${os.size} OS bytes.`);
+    }
+    const valid = (this.osValid ?? simOSSigned)(os.data) && bytesEqual(os.data.subarray(0, os.header.length), os.header);
+    this.osInstalls.push({ data: os.data, valid });
+    this.phase = 'idle';
+    if (this.osTiming.eotDelay) this._queueDelay(this.osTiming.eotDelay);
+    this.queueVirtual(0x0006, [0x01, 0x00, 0x00, 0x00, 0x14]);
+    // Once the host has read the acknowledgement, the calculator checks the OS
+    // and restarts: it leaves the bus, and comes back on replug() with the new
+    // OS (RAM cleared, archive kept), or still waiting for one.
+    this._afterAck = () => {
+      if (valid) {
+        this.waitingForOS = false;
+        this.os = { major: os.version.major, minor: os.version.minor, micro: os.version.micro, build: os.version.build };
+        for (const [k, v] of [...this.vars]) if (!v.archived) { this._free(v); this.vars.delete(k); }
+      }
+      this._os = null;
+      this.unplug();
+    };
   }
 
   _paramRequest(d) {
     const r = reader(d);
     const ids = Array.from({ length: r.u16() }, () => r.u16());
     if (r.left !== 0) return this._bad('Parameter Request has trailing bytes.');
+    if (ids.includes(0x0022)) {
+      if (ids.length !== 1) return this._bad('A screenshot is asked for alone, as libticalcs asks for it.');
+      return this._screenshot();
+    }
     const values = this.params();
     const out = [be16(ids.length)];
     for (const id of ids) {
@@ -632,6 +806,18 @@ export class SimulatedCalculator {
       out.push(v === undefined ? [...be16(id), 1] : [...be16(id), 0, ...be16(v.length), ...v]);
     }
     this.queueVirtual(0x0008, concat(...out));
+  }
+
+  // Parameter Data with the one parameter 0x0022: its size field is 16 bits
+  // and cannot hold the frame's 153,600 bytes, so it carries the low half,
+  // as libticalcs' reader allows.
+  _screenshot() {
+    const frame = typeof this.screen === 'function' ? this.screen(this) : this.screen;
+    if (typeof frame === 'number') return this._queueError(frame);
+    const data = frame ?? new Uint8Array(320 * 240 * 2).fill(0xFF);
+    if (!(data instanceof Uint8Array) || data.length !== 320 * 240 * 2) throw new Error('A simulated screen is 153,600 bytes of RGB565.');
+    this.screenshots++;
+    this.queueVirtual(0x0008, concat(be16(1), be16(0x0022), 0, be16(data.length & 0xFFFF), data));
   }
 
   /** Parameter values, in the layout observed on a CE. */
@@ -801,6 +987,28 @@ export class SimulatedCalculator {
     this.queueVirtual(0xAA00, [0x01]);
   }
 
+
+  /**
+   * Execute (remote control), as libticalcs sends it to a CE: an empty
+   * folder and name, the action, and for a key (action 3) two bytes, the
+   * code big-endian when it fits one byte, little-endian when it does not.
+   * Only keys are taken; a CE acknowledges a program launch and runs nothing
+   * (observed on hardware), which the simulator refuses as unsupported.
+   */
+  _execute(d) {
+    if (d.length !== 5) return this._bad(`An Execute packet for a key holds 5 bytes, not ${d.length}.`);
+    if (d[0] !== 0 || d[1] !== 0) return this._bad('An Execute packet for a key names no folder and no program.');
+    if (d[2] !== 0x03) return this._queueError(SIM_ERR.UNSUPPORTED);
+    const code = d[3] === 0 ? d[4] : d[3] | (d[4] << 8);
+    if (this.running && this.runningKeys !== 'take') {
+      this.queuedKeys.push(code);
+      return;
+    }
+    this.keys.push(code);
+    if (this.onKey?.(code)) return;
+    if (this.keyDelayUs != null) this._queueDelay(this.keyDelayUs);
+    this.queueVirtual(0xAA00, [0x01]);
+  }
 
   /**
    * Built-in lists and equations are named with subscript digits on the wire

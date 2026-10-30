@@ -29,6 +29,12 @@ const RELEASE = tag => `https://github.com/YvanTT/arTIfiCE/releases/tag/${tag}`;
 // page generator put them on #cec-shell.
 const WRITTEN = document.getElementById('cec-shell')?.dataset.writtenSteps || '#manual';
 const writtenAttrs = () => (/^https?:/.test(WRITTEN) ? ' target="_blank" rel="noopener nofollow"' : '');
+const SHELL = document.getElementById('cec-shell')?.dataset || {};
+const LOCAL = PREVIEW_HOST ? new URLSearchParams(location.search) : null;
+const setting = (param, attr, fallback) => (LOCAL?.has(param) ? LOCAL.get(param) : SHELL[attr] || fallback);
+// The Run screen's "Did arTIfiCE open?" and the running-program check before
+// a v2.1 send (data-runcheck 'on'). Both arms of the AsmHook2 split ask too.
+const RUN_CHECK = setting('runcheck', 'runcheck', 'off') === 'on';
 const GAMES = '/downloads/ti84plusce/games/';
 // A page that sent the student here with ?next=<path> (core's
 // INSTALLER_RETURNS): the last screen goes back there instead of to games.
@@ -319,6 +325,7 @@ const state = {
   v21: null,        // arTIfiCE v2.1 then Snake; a retry resumes at the one that failed
   deadEnd: false,   // the screen on show ends the install (its footer shows Manual installation)
   screen: '',       // the ce_step name of the screen on show
+  answered: {},     // Run screen check: answer -> true, so one page load counts each once
 };
 
 function root() { return $('#cec'); }
@@ -339,7 +346,7 @@ function progress() {
 // running. A version arTIfiCE doesn't cover has no manual route either.
 // One wrong_model keeps it: a calculator that gave no model name
 // (unreadModel), which is almost always a CE TI Connect CE can still reach.
-const NO_MANUAL = ['evo', 'no_webusb', 'other_model', 'wrong_model', 'low_battery', 'tab_busy'];
+const NO_MANUAL = ['evo', 'no_webusb', 'other_model', 'wrong_model', 'low_battery', 'tab_busy', 'running_before'];
 function showManual(on) {
   const a = root()?.querySelector('.cec-manual');
   if (a) a.hidden = !on;
@@ -951,8 +958,24 @@ function viewFilesV21() {
 async function sendArtificeV21() {
   const { bytes, spec } = state.picked[OFFICIAL.v21.files[0].file];
   say('Sending.');
-  await tracked('ARTIFICE_V21', () => transport.sendVerified(bytes, { official: spec }));
+  await tracked('ARTIFICE_V21', async () => {
+    await freeToSend();
+    await transport.sendVerified(bytes, { official: spec });
+  });
 }
+
+// Before a v2.1 send (RUN_CHECK): a program left running refuses the file
+// part way, so the page looks first and names the key that leaves it.
+async function freeToSend() {
+  if (!RUN_CHECK || state.info?.route !== 'v21') return;
+  if (!(await transport.busyCheck()).running) return;
+  throw refusal('RUNNING_BEFORE', runningBeforeText());
+}
+const runningBeforeText = () => [
+  'A program is running on your calculator, so it can\'t take files.',
+  `If it shows arTIfiCE's list of games, press ${LEAVE_SHELL_KEY} to leave it.`,
+  'If it\'s another program, quit it. Then press the button again.',
+].filter(Boolean).join(' ');
 
 // arTIfiCE alone, for someone who does not want Snake. It lands on the Run
 // screen a skipped Snake leads to, which asks for a game before A runs.
@@ -1009,11 +1032,53 @@ function viewV21Run({ snake, only = false }) {
     ${snake ? '' : `<p>Put a game on the calculator before you run A. Send ${GAME.label} here, or pick one from the games page.</p>${sendActions()}`}
     ${walk('ce-jb-v21-run')}
     <p>Whenever you want to play: ${keyHelpHtml('cec')}, run A, pick the game. Press <kbd>${LEAVE_SHELL_KEY}</kbd> to leave arTIfiCE.</p>
+    ${RUN_CHECK ? checkBlock('plain') : ''}
     ${gamesActions()}
   `, 3, runScreen({ snake, only }));
   if (!snake) wireSends();
+  if (RUN_CHECK) wireCheck('plain');
 }
 
+
+// "Did arTIfiCE open?" under the Run walk: two buttons, each answer counted
+// once per page load as ce_step (screen v21_check or v21_hook_check, outcome
+// yes or no). No lists the likely causes.
+const CHECKS = {
+  plain: {
+    screen: 'v21_check',
+    question: 'Did arTIfiCE open?',
+    yes: () => 'Arrow to a game and press enter.',
+    no: () => [
+      'No A after you press prgm? Press Start over and send arTIfiCE again.',
+      'You see A\'s code? That is the EDIT tab. Press quit, then prgm, and pick A under EXEC.',
+      'prgmA is still on the home screen? Press enter.',
+      'On a Python edition, prgm asks for TI-Basic or Python first. Choose TI-Basic.',
+    ],
+  },
+};
+const checkBlock = kind => `
+    <div class="cec-check" id="cec-check">
+      <p class="cec-check-q">${CHECKS[kind].question}</p>
+      <div class="cec-report-choices"><button type="button" data-answer="yes">Yes</button><button type="button" data-answer="no">No</button></div>
+      <div class="cec-check-fix" id="cec-check-fix" hidden></div>
+    </div>`;
+function wireCheck(kind) {
+  const box = $('#cec-check');
+  box?.querySelectorAll('[data-answer]').forEach(b => {
+    b.onclick = () => {
+      const answer = b.dataset.answer;
+      box.querySelectorAll('[data-answer]').forEach(x => x.classList.toggle('is-picked', x === b));
+      const fix = $('#cec-check-fix');
+      fix.innerHTML = answer === 'yes' ? `<p>${CHECKS[kind].yes()}</p>`
+        : `<ul>${CHECKS[kind].no().map(line => `<li>${line}</li>`).join('')}</ul>`;
+      fix.hidden = false;
+      const key = `${kind}_${answer}`;
+      if (state.answered[key]) return;
+      state.answered[key] = true;
+      track('ce_step', { screen: CHECKS[kind].screen, route: 'v21', outcome: answer });
+    };
+  });
+}
 function viewV3Installer() {
   filesScreen({
     files: [OFFICIAL.v3.files[0]],
@@ -1136,6 +1201,7 @@ async function sendGameTo(game) {
   let link = null;
   try {
     link = await gameLink();
+    if (link === transport.link) await freeToSend();
     say(`Getting ${game.label}.`);
     const response = await fetch(game.file);
     if (!response.ok) throw refusal('FETCH', `${game.label} could not be downloaded from this site. Try again in a moment.`);
