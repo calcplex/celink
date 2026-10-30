@@ -6,6 +6,13 @@
 //                  card (Send to calculator, with Download file under the arrow)
 //   a game page    one card under the download button: Connect, then Send
 //   the math page  the hub's layout; the programs are TI-Basic, so no jailbreak
+//   a program page one program's own page (data-ce-page="program"): a box
+//                  under its download button, which stays: Connect, then Send.
+//                  Send only (no Delete, no stars). Its words say program,
+//                  not game, and data-ce-asm on the tag (an assembly program
+//                  in the download) brings the jailbreak check; without it
+//                  the program is TI-Basic and runs on any OS, as on the
+//                  math page
 // When the build switches Delete on, a game the connected calculator already
 // has Delete as its main button on the hub and its own page, with Send
 // again first under the arrow. The math page does the same, but only for a
@@ -43,7 +50,7 @@ import { CELink } from '../celink.mjs';
 import * as SC from './sendconnect.mjs';
 
 // The script tag can set the page up for markup other than this site's own:
-// data-ce-page (hub, game or math, instead of reading it from the path),
+// data-ce-page (hub, game, math or program, instead of reading it from the path),
 // data-ce-cards (the hub's cards), data-ce-title (a card's title),
 // data-ce-button (the element around a card's download link), data-ce-panel
 // (the element the connect panel goes before), data-ce-installer (the
@@ -63,6 +70,8 @@ import * as SC from './sendconnect.mjs';
 // the measured free RAM each game needs to start (gamesend's ramToStart), and
 // data-ce-parts the address of the games whose optional parts a send can
 // leave out when the archive is short (core's partsOf, gamesend's sendGame).
+// On a program page, data-ce-title is the element that names the program
+// (the page's h1 when unset) and data-ce-asm marks an assembly program.
 const SETUP = document.querySelector('script[src*="/ce-send.mjs"]')?.dataset ?? {};
 const INSTALLER = SETUP.ceInstaller || '/ti84plusce-jailbreak-tutorial/';
 const INSTALLER_TARGET = /^https?:\/\//.test(INSTALLER) ? ' target="_blank" rel="noopener"' : '';
@@ -78,6 +87,8 @@ const GATE_TEXT = label => `${esc(label)}'s author asked that the license and re
 const GATE_DONE = 'Downloaded. Now connect your calculator to send it.';
 const GATE_SEND = 'Downloaded. Now click Send to calculator to send it.';
 const firstLabel = file => `Download .${file.split('.').pop().toLowerCase()}`;
+// A program page's download holds an assembly program (data-ce-asm).
+const ASM = SETUP.ceAsm != null;
 
 // ?win=1 and ?cros=1 preview the Windows and Chrome OS wording on localhost.
 const WIN = isWindows(navigator) || (PREVIEW_HOST && /[?&]win=1\b/.test(location.search));
@@ -287,7 +298,7 @@ const DEFRAG_TEXT = 'Your calculator is defragmenting its memory to make room. T
 const LOST_TEXT = 'The calculator stopped responding. If a game is running on it, quit the game and try again. Otherwise, unplug it, plug it back in, and try again.';
 // The math page's things are programs.
 const LOST_TEXT_MATH = 'The calculator stopped responding. If a program is running on it, quit it and try again. Otherwise, unplug it, plug it back in, and try again.';
-const lostText = () => (page === 'math' ? LOST_TEXT_MATH : LOST_TEXT);
+const lostText = () => (programWords() ? LOST_TEXT_MATH : LOST_TEXT);
 // A listing that went silent part way (core's stalledListing) is a calculator
 // to turn off and on, and the second time in this tab one whose RAM needs a
 // reset; a connect that times out after one is the same silence. Counted per
@@ -318,14 +329,19 @@ const CHROMEOS_TEXT = {
 // After a click through to an installer on another site, a refused open is
 // most likely that tab still holding the calculator: name it first.
 const INSTALLER_TAB_TEXT = { open_failed: "Couldn't connect. Close the jailbreak tab and anything else using the calculator (like TI Connect CE or another tab), unplug it and plug it back in, then try again." };
-const ownText = err => ({ ...OUTCOME_TEXT, link_lost: lostText(), timeout: stallText(err, { page, route: calc?.route }) ?? lostText(), evo: evoText(page), ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}), ...(wentToInstaller ? INSTALLER_TAB_TEXT : {}), ...(WIN && openDetail(err) === 'open_security' ? { open_failed: WINDOWS_SECURITY_TEXT } : {}) });
-const errorText = err => pageErrorText(err, { page, own: ownText(err) });
+const ownText = err => ({ ...OUTCOME_TEXT, link_lost: lostText(), timeout: stallText(err, { page: basic() ? 'math' : page, route: calc?.route }) ?? lostText(), evo: evoText(wordsPage()), ...(CROS ? CHROMEOS_TEXT : {}), ...(WIN ? WINDOWS_TEXT : {}), ...(wentToInstaller ? INSTALLER_TAB_TEXT : {}), ...(WIN && openDetail(err) === 'open_security' ? { open_failed: WINDOWS_SECURITY_TEXT } : {}) });
+const errorText = err => pageErrorText(err, { page: wordsPage(), own: ownText(err) });
 // errorText as HTML: a TI-84 Evo gets a link to the site's Evo page.
-const errorHtml = err => (failReason(err) === 'evo' ? evoHtml(page, evoAddress(page, SETUP.ceEvo)) : esc(errorText(err)));
+const errorHtml = err => (failReason(err) === 'evo' ? evoHtml(wordsPage(), evoAddress(wordsPage(), SETUP.ceEvo)) : esc(errorText(err)));
 
 // One link per page, opened on the first click that needs it, or on load when
 // the browser already allowed a plugged-in calculator on this site.
 let page = 'game';
+// A program page speaks of programs, as the math page does (core's words
+// follow `wordsPage`), and its TI-Basic programs need no jailbreak (`basic`).
+const programWords = () => page === 'math' || page === 'program';
+const wordsPage = () => (page === 'program' ? 'math' : page);
+const basic = () => page === 'math' || (page === 'program' && !ASM);
 let link = null, calc = null;
 let busy = false, connecting = false, present = false, sendAnyway = false;
 // The installer on another site opens in a new tab, and this tab's open link
@@ -536,7 +552,7 @@ function askTIConnect() {
 // 'send_anyway', or 'cancel' (Escape or a click outside).
 async function askJailbreak() {
   const choice = await modal(`<h2>Jailbreak your calculator first</h2>
-      <p>This calculator can't run games until it's jailbroken. It only takes a few minutes, and then every game here will work.</p>
+      <p>${page === 'program' ? "This calculator can't run this program until it's jailbroken. It only takes a few minutes." : "This calculator can't run games until it's jailbroken. It only takes a few minutes, and then every game here will work."}</p>
       <p class="ce-modal-actions"><a class="ce-modal-go" href="${INSTALLER}"${INSTALLER_TARGET}>Jailbreak it now</a>
       <button type="button" class="ce-modal-anyway">Send anyway</button></p>`,
   (d, done) => {
@@ -550,7 +566,8 @@ async function askJailbreak() {
 function verdict(c, where) {
   const connected = os => `<strong>Calculator connected</strong> (${os})`;
   const os = `OS ${esc(shortOs(c.os))}`;
-  if (page === 'math') return `${connected(os)}. ${where}`;
+  if (basic()) return `${connected(os)}. ${where}`;
+  if (page === 'program') return programVerdict(c, where, connected, os);
   switch (jailbreakState(c.route, c.tools)) {
     // No jailbreak on 5.4 and earlier, so no A: say how games start there.
     case 'none': return `${connected(os)}. ${where} ${needsAsm(c.os) ? 'No jailbreak needed: games start through Asm( on this version.' : `No jailbreak needed: games start from the ${keyHelpHtml('ce')} menu.`}`;
@@ -573,7 +590,7 @@ function statusHtml(where) {
 
 function statusKind() {
   if (!(link && calc)) return '';
-  if (page === 'math') return 'ok';
+  if (basic()) return 'ok';
   const state = jailbreakState(calc.route, calc.tools);
   return state === 'missing' || state === 'blocked' ? 'warn' : 'ok';
 }
@@ -769,6 +786,17 @@ function partsHtml(r, listed, name, label) {
 }
 
 let helpPanels = 0;
+// verdict for an assembly program on its own page: one program, so "it".
+function programVerdict(c, where, connected, os) {
+  switch (jailbreakState(c.route, c.tools)) {
+    case 'none': return `${connected(os)}. ${where} No jailbreak needed: ${needsAsm(c.os) ? 'it starts through Asm( on this version.' : `it starts from the ${keyHelpHtml('ce')} menu.`}`;
+    case 'found': return `${connected(`${os}, jailbroken`)}. ${where} ${c.route === 'v21' ? `It starts from ${keyHelpHtml('ce')}, then A.` : `It starts from the ${keyHelpHtml('ce')} menu.`}`;
+    case 'shell': return `${connected(`${os}, jailbroken`)}. ${where} Start it from ${esc(shellLabel(c.route, c.tools))}.`;
+    case 'missing': return `${connected(os)}. It needs a jailbreak before it will run: ${jailbreakLink('jailbreak it first')}, then come back and send it.`;
+    default: return `${connected(os)}. There's no jailbreak for this version yet, so this program won't run on it.`;
+  }
+}
+
 function sentHtml(r, main, asm, c, partial = null) {
   const state = jailbreakState(r.route, c.tools);
   // A shell starts games from inside itself, so its sentence names no key.
@@ -781,20 +809,20 @@ function sentHtml(r, main, asm, c, partial = null) {
   const sent = partial ? '' : '<strong>Sent!</strong> ';
   if (asm && state === 'missing') {
     html.push(`<p>${sent}It won't start until your calculator is jailbroken: ${jailbreakLink('jailbreak it now')}, then ${lower}</p>`);
-  } else if (main && startHelpShown(page, asm, state)) {
+  } else if (main && page !== 'program' && startHelpShown(page, asm, state)) {
     const id = `ce-help-${++helpPanels}`;
     html.push(`<p>${sent}To play it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Game didn't start?</button></p>`,
       helpPanel(id, { route: r.route, jb: state, game: main.name, os: r.os, shell: shellLabel(r.route, c.tools) }));
-  } else if (main && findHelpShown(page, r.os)) {
+  } else if (main && findHelpShown(basic() ? 'math' : page, r.os)) {
     const id = `ce-help-${++helpPanels}`;
     html.push(`<p>${sent}To run it, ${lower} <button type="button" class="ce-help-open" aria-expanded="false" aria-controls="${id}">Can't find it?</button></p>`,
       findPanel(id, { route: r.route, game: main.name, os: r.os }));
   } else {
-    html.push(`<p>${sent}To ${page === 'math' ? 'run' : 'play'} it, ${lower}</p>`);
+    html.push(`<p>${sent}To ${programWords() ? 'run' : 'play'} it, ${lower}</p>`);
   }
   for (const w of r.warnings) {
     if (w.code !== 'LOW_RAM_TO_RUN') continue;
-    const what = page === 'math' ? 'program' : 'game';
+    const what = programWords() ? 'program' : 'game';
     // A measured figure is worth naming; the estimate is only a lower bound.
     html.push(w.measured
       ? `<p>Your calculator is low on RAM (${w.freeKB} KB free) and this ${what} needs about ${w.needKB} KB to start, so it may stop with ERROR: MEMORY. Delete or archive about ${w.shortKB} KB of programs you don't need (2nd, +, 2: Mem Management).</p>`
@@ -1300,6 +1328,83 @@ function mountGame() {
   demoSent(show, label, file);
 }
 
+// A program's own page: one box under the download button, which stays as
+// it is. The box says what to do and turns green or amber with the OS and
+// jailbreak state, as the hub's panel does; its button connects, then sends
+// (data-ce-send-label names it). Progress and the outcome go in a message
+// right under the box, with a bar under Sending… (data-ce-progress="bar");
+// the two sit in one .ce-program-wrap.
+// Send only: no Delete, no arrow menu, no stars.
+function mountProgram() {
+  const a = [...document.querySelectorAll('.entry-content a[href^="/downloads/ce/"], main a[href^="/downloads/ce/"]')]
+    .find(el => /\.(8xg|8xp|zip)$/i.test(el.getAttribute('href')));
+  if (!a) return;
+  const file = decodedHref(a);
+  const label = (document.querySelector(SETUP.ceTitle || 'h1')?.textContent || '').trim() || 'This program';
+  const sendLabel = SETUP.ceSendLabel || 'Send to calculator';
+  const where = `Now click ${esc(sendLabel)}${/[.!?]$/.test(sendLabel) ? '' : '.'}`;
+  const box = document.createElement('div');
+  box.className = 'ce-conn ce-program';
+  box.setAttribute('role', 'status');
+  box.innerHTML = '<p class="msg"></p><p class="msg err" hidden></p><button type="button" class="ce-conn-go"></button>';
+  const status = document.createElement('div');
+  status.className = 'ce-card-status';
+  status.setAttribute('role', 'status');
+  // Both in one block, so the message lines up under the box beside a floated picture.
+  const wrap = document.createElement('div');
+  wrap.className = 'ce-program-wrap';
+  wrap.append(box, status);
+  (a.closest(SETUP.ceButton || '.wp-block-button') || a).after(wrap);
+  watchDownloads(document);
+  const [msg, err, button] = box.children;
+  const show = (html, kind) => {
+    status.innerHTML = html && kind !== 'busy' ? CLOSE_X + html : html;
+    status.className = `ce-card-status is-${kind}`;
+    return status;
+  };
+  const say = (t, pct) => {
+    if (t) show(`<p>${esc(t)}</p>` + (pct != null && SETUP.ceProgress === 'bar' ? `<div class="ce-bar"><span style="width:${Math.max(0, Math.min(100, pct))}%"></span></div>` : ''), 'busy');
+    else if (status.classList.contains('is-busy')) show('', '');
+  };
+  status.addEventListener('click', e => {
+    if (e.target.closest('.ce-close')) show('', '');
+    else if (e.target.closest('.ce-send-again')) send();
+  });
+  // HTML, from errorHtml: a failed connect, shown until the next try.
+  let boxError = '';
+  const send = () => {
+    if (busy || connecting) return;
+    show('', '');
+    run({ file, label, say, show });
+  };
+  button.onclick = () => {
+    if (busy || connecting) return;
+    if (link && calc) {
+      send();
+      return;
+    }
+    boxError = '';
+    show('', '');
+    connectFromClick(t => { button.textContent = t; button.disabled = true; }, e => { boxError = errorHtml(e); }, { repaint: false });
+  };
+  listeners.add(() => {
+    const connected = !!(link && calc);
+    const kind = statusKind();
+    box.className = 'ce-conn ce-program' + (kind ? ' ' + kind : boxError && !connected ? ' bad' : '');
+    msg.innerHTML = connected ? verdict(calc, where)
+      : connecting ? 'Connecting to your calculator…'
+        : parked && parkedFor === 'page' ? IN_OTHER_TAB
+          : parked ? 'When you’re done jailbreaking, connect your calculator again.'
+            : esc(SETUP.cePrompt || 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this program.');
+    err.innerHTML = connected ? '' : boxError;
+    err.hidden = connected || !boxError;
+    button.textContent = connected ? sendLabel : 'Connect your calculator';
+    button.disabled = busy || connecting;
+  });
+  changed();
+  demoSent(show, label, file);
+}
+
 const ARROW = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function closeMenus(except) {
@@ -1543,11 +1648,13 @@ function mount() {
   const at = path => here === path || here === path + 'index.html';
   // A tag that carries the math list makes this the math page wherever it is
   // served, so its Delete can only go by content.
-  page = OWN_URL ? 'math' : ['hub', 'game', 'math'].includes(SETUP.cePage) ? SETUP.cePage : at(HUB) ? 'hub' : at(MATH) ? 'math' : 'game';
+  // data-ce-page="program" names a program's own page, wherever it is served.
+  page = OWN_URL ? 'math' : ['hub', 'game', 'math', 'program'].includes(SETUP.cePage) ? SETUP.cePage : at(HUB) ? 'hub' : at(MATH) ? 'math' : 'game';
   watchHelp(document);
   watchFeedback(document);
   watchMenus();
   if (page === 'game') mountGame();
+  else if (page === 'program') mountProgram();
   else mountHub();
   // An out-of-space list follows the listing, and its Deletes wait for the
   // cable and for other work.
