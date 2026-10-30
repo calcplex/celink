@@ -6,7 +6,14 @@
 // this is the wizard around them. The arTIfiCE files come from this site and
 // are checked against their pins before they reach USB; if that fails, the
 // student picks the author's download instead.
+//
+// Connect, second version: every computer starts on Connect (Windows is asked
+// about TI Connect CE only after an empty device list), a Connect after a lost
+// link asks for the calculator again instead of a reload, and the screens
+// around it say what the device list looks like. The logic it adds is
+// connect.mjs.
 import { CETransport } from './transport.mjs';
+import { OS_540_URL, connectAfresh, connectFailScreen, noUsbKind, offersOs540, reconnect, runningText } from './connect.mjs';
 import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
   INEQUALZ_URL, LEAVE_SHELL_KEY, OFFICIAL, PREVIEW_HOST, ROUTES, RUNNING_TEXT, TICONNECT_URL, archiveMode, calcParams, compatibility, esc,
@@ -28,6 +35,8 @@ const GAMES = '/downloads/ti84plusce/games/';
 const BACK = installerReturn(location.search);
 // The connection picture, served beside this module.
 const ART = '/ti84plusce-jailbreak-tutorial/connection.svg';
+// The browser's device list with the calculator picked, served beside it too.
+const PICKER_ART = '/ti84plusce-jailbreak-tutorial/picker.webp';
 // The game the Play screen sends: one assembly program, no C libraries.
 // `name` is the variable inside the file.
 const GAME = { id: 'cec-snake', label: 'Snake', file: '/downloads/ce/SnakeCE.8xg', name: 'SNAKE' };
@@ -188,7 +197,7 @@ const STEPS = ['Connect', 'Check', 'Install', BACK ? 'Done' : 'Play'];
 // Where the words are ours. Refusals read through refusalText; anything else
 // shows the error's own message.
 const OUTCOME_TEXT = {
-  no_device: 'No calculator was picked. Press the button again and choose it from the list.',
+  no_device: 'No calculator was picked. Press the button again, click your calculator in the list, then Connect.',
   open_failed: 'Another program is using the calculator. Close TI Connect CE and anything else that talks to it, unplug the calculator, plug it back in, then press Connect calculator again.',
   link_lost: 'The calculator stopped answering. If a game is running on it, quit the game and connect again. Otherwise, unplug the USB cable, plug it back in, then choose Start over.',
   low_battery: 'Charge the calculator before installing. Sending an app needs a battery that is not low.',
@@ -231,6 +240,7 @@ function reportFix(choice) {
   // On Windows the missing driver is by far the likeliest cause.
   if (choice === 'not_found') return li([
     onWindows() && `On Windows, <button type="button" class="cec-inline" data-go="install">install TI Connect CE</button>, and close it before you press Connect.`,
+    'In the device list, click your calculator, then Connect.',
     'Use the USB cable that came with the calculator. Some cables only charge and carry no data.',
     'Turn the calculator on, unplug the cable, then plug it back in.',
     'Use Chrome or Edge on a computer.',
@@ -242,6 +252,12 @@ function reportFix(choice) {
     // Only v3 restarts the calculator; before a connect the route is not known.
     (!i || i.route === 'v3') && 'With arTIfiCE v3 the calculator restarts by itself when the jailbreak installs. That part is normal.',
     manual('If it keeps happening, try the'),
+  ]);
+  // A calculator that needs no jailbreak has nothing to install by hand, so
+  // its answer is how to start a game, not the manual installation alone.
+  if (choice === 'other' && i?.route === 'native') return li([
+    esc(startHint(i.os, 'the game')),
+    manual('The steps for your OS, with pictures, are in the'),
   ]);
   if (choice === 'wont_start') return li([
     i ? esc(startHint(i.os, 'the game')) : 'Start games the way the Play step shows for your calculator.',
@@ -302,6 +318,7 @@ const state = {
   reported: {},     // report choice -> true, so one page load counts each once
   v21: null,        // arTIfiCE v2.1 then Snake; a retry resumes at the one that failed
   deadEnd: false,   // the screen on show ends the install (its footer shows Manual installation)
+  screen: '',       // the ce_step name of the screen on show
 };
 
 function root() { return $('#cec'); }
@@ -388,6 +405,7 @@ function paint(body, step, screen, { deadEnd = false } = {}) {
   state.gate = null;
   state.afterWork = null;
   state.step = step;
+  state.screen = screen;
   state.deadEnd = deadEnd;
   root().innerHTML = `<section class="cec-card">${progress()}${keepKeyPunctuation(body)}
     <p class="cec-status" role="status" aria-live="polite" id="cec-status"></p>
@@ -416,7 +434,12 @@ function paint(body, step, screen, { deadEnd = false } = {}) {
 // and open_failed a running TI Connect CE or another tab holding the port.
 // open_security, an open refused for security, is a driver the browser can't
 // open the calculator through, which the latest TI Connect CE replaces.
+// A failed Connect moves to its own screen for the first two (connectFailScreen);
+// these bands are for the same failure again on that screen, and for a device
+// list opened by any other button.
 const WINDOWS_OUTCOME_HTML = {
+  no_device_again: `<p><strong>No calculator was picked.</strong> In the list, click your calculator, then Connect.
+    If the list is empty, check that the calculator is on and try another USB cable. Some cables only charge.</p>`,
   no_device: `<p><strong>Calculator not in the list?</strong> On Windows it only shows up once
     TI Connect CE is installed. If it is installed, update it to the latest version from TI,
     check that the calculator is on and plugged in, then press Connect calculator again.</p>
@@ -428,8 +451,9 @@ const WINDOWS_OUTCOME_HTML = {
     TI Connect CE to the <a href="${TICONNECT_URL}" target="_blank" rel="noopener nofollow">latest version from TI</a>,
     then unplug the calculator, plug it back in and press Connect calculator again.</p>`,
 };
-// The Windows box for an error: open_security has its own.
-const windowsKey = (err, reason) => (reason === 'open_failed' && openDetail(err) === 'open_security' ? 'open_security' : reason);
+// The Windows box for an error: open_security has its own, and so does an
+// empty list on the screen that already says to install TI Connect CE.
+const windowsKey = (err, reason) => (reason === 'open_failed' && openDetail(err) === 'open_security' ? 'open_security' : reason === 'no_device' && (state.screen === 'win_nodevice' || state.screen === 'win_install') ? 'no_device_again' : reason);
 // A TI-84 Evo shares TI's vendor id, so it shows in the device list.
 const EVO = '/ti84evo-jailbreak/';
 const EVO_OUTCOME_HTML = `<p>That's a TI-84 Evo. This jailbreak is only for the TI-84 Plus CE, and there is no jailbreak for the Evo yet. <a href="${EVO}">What your Evo can run</a></p>`;
@@ -439,7 +463,7 @@ const EVO_OUTCOME_HTML = `<p>That's a TI-84 Evo. This jailbreak is only for the 
 // Chromebook line goes with it.
 const CHROMEOS_OUTCOME_TEXT = {
   open_failed: "Couldn't connect. Close any other tab using the calculator, unplug it and plug it back in, then press Connect calculator again. Some school Chromebooks don't let websites use USB devices, so if it keeps failing, try a Windows or Mac computer.",
-  no_device: "No calculator was picked. Press the button again and choose it from the list. Some school Chromebooks don't let websites use USB devices, so if no list opens, try a Windows or Mac computer.",
+  no_device: "No calculator was picked. Press the button again, click your calculator in the list, then Connect. Some school Chromebooks don't let websites use USB devices, so if no list opens, try a Windows or Mac computer.",
   picker: "Your browser couldn't open the list of devices. Some school Chromebooks don't let websites use USB devices, so try a Windows or Mac computer.",
 };
 // The Chrome OS text for an error: a failed device list has its own.
@@ -458,7 +482,9 @@ function fail(err) {
   const reason = installerFailReason(err);
   state.lastReason = reason;
   if (programRunning(err)) {
-    el.textContent = RUNNING_TEXT;
+    el.textContent = runningText({ route: state.info?.route, screen: state.screen }) || RUNNING_TEXT;
+  } else if (lostText(err, reason)) {
+    lostBand(lostText(err, reason));
   } else if (reason === 'evo') {
     el.innerHTML = EVO_OUTCOME_HTML;
   } else if (onWindows() && WINDOWS_OUTCOME_HTML[windowsKey(err, reason)]) {
@@ -473,6 +499,47 @@ function fail(err) {
   el.hidden = false;
   showManual(state.deadEnd || !(programRunning(err) || (NO_MANUAL.includes(reason) && !unreadModel(err))));
   say('');
+}
+
+// A link that died part way through an install (unplugged, stopped answering,
+// taken by another tab) is picked up again from the screen the student is on:
+// the band's button opens the device list and checks it is the same calculator.
+const LOST_TEXT = {
+  POISONED: 'The connection to the calculator was lost. Unplug it and plug it back in.',
+  OTHER_CALCULATOR: 'This is not the calculator you started with. Plug that one in.',
+};
+// A link that dies during a send on Check or Install gets the same band, except
+// while the v3 trigger goes, which restarts the calculator on purpose, and on
+// the native screen, whose Send picks the calculator itself.
+const OWN_PICK = ['native', 'v3_inequalz'];
+function lostText(err, reason) {
+  if (LOST_TEXT[err?.code]) return LOST_TEXT[err.code];
+  const during = state.step >= 1 && state.step <= 2 && !OWN_PICK.includes(state.screen);
+  if (during && transport.poisoned && (reason === 'link_lost' || reason === 'timeout')) return 'The calculator stopped answering. Unplug it and plug it back in.';
+  return null;
+}
+function lostBand(lead) {
+  const el = $('#cec-error');
+  if (!el) return;
+  el.innerHTML = `<p>${esc(lead)} Then <button type="button" class="cec-inline" data-go="reconnect">connect again</button>.</p>`;
+  el.hidden = false;
+  el.querySelector('[data-go="reconnect"]').onclick = reconnectClick;
+}
+function reconnectClick() {
+  work(async () => {
+    trackStep('reconnect_click');
+    say('Pick your calculator in the browser window that opens.');
+    const before = transport.link;
+    try {
+      await reconnect(transport, { beforeOpen: claim });
+    } catch (err) {
+      if (transport.link === before) markPicker(err);
+      trackConnectFail(err, {}, transport.link === before ? undefined : transport.link?.device);
+      throw err;
+    }
+    trackStep('reconnected');
+    say('Connected again. Carry on from this step.');
+  });
 }
 
 // Every USB touch runs through here: one at a time, buttons locked, errors shown.
@@ -507,43 +574,76 @@ function factsBlock({ reason = true } = {}) {
 }
 
 // Windows reaches a CE only through the driver TI Connect CE 6.1+ installs;
-// without it Chrome's picker is empty (observed on Windows). So Windows is
-// asked first. The installer does not open TI Connect CE when it finishes
-// (observed on Windows), so the install screen only warns against opening it.
+// without it Chrome's picker is empty (observed on Windows). Every computer
+// starts on Connect; on Windows an empty or cancelled list moves to the screen
+// that installs or updates TI Connect CE (connectFailScreen), and an open
+// refused for security to the one that updates it. Both carry their own
+// Connect button. The installer does not open TI Connect CE when it finishes
+// (observed on Windows), so those screens only warn against opening it.
 // The localhost preview can force either platform.
 let forceWindows = false, forceChromeOS = false;
 const onWindows = () => forceWindows || isWindows(navigator);
 const onChromeOS = () => forceChromeOS || isChromeOS(navigator);
-function viewWindowsCheck() {
+
+// What the device list looks like, under every Connect button: the picture
+// is the list as the browser draws it, the caption the one thing to do in it.
+const pickerHint = () => `
+    <figure class="cec-picker">
+      <img src="${PICKER_ART}" alt="The browser's device list: the calculator's name selected, and the Connect button" width="220" height="220" decoding="async">
+      <figcaption>In the list that opens, click your calculator, then Connect.</figcaption>
+    </figure>`;
+const connectButton = () => `
+    <div class="cec-actions">
+      <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-go">Connect calculator</button></div>
+    </div>`;
+
+const TI_LINK = text => `<a href="${TICONNECT_URL}" target="_blank" rel="noopener nofollow">${text}</a>`;
+const WIN_STEPS = [
+  `${TI_LINK('Download TI Connect CE from TI')} and run the installer. Already have it? Update it to the latest version.`,
+  '<strong>If you open TI Connect CE, close it</strong> before you carry on. We can\'t reach the calculator while it\'s open.',
+  'Unplug the calculator, plug it back in and turn it on.',
+];
+const WIN_FIX = {
+  // From "Didn't work?" > Connect doesn't find my calculator.
+  install: {
+    heading: 'Install TI Connect CE first',
+    sub: "Without it, your calculator won't show up when you press Connect.",
+    steps: WIN_STEPS,
+  },
+  // After an empty or cancelled device list.
+  nodevice: {
+    heading: 'Install TI Connect CE, then connect again',
+    sub: 'On Windows, your calculator only shows up in the list once TI Connect CE is installed.',
+    steps: WIN_STEPS,
+  },
+  // After an open refused for security (open_security).
+  security: {
+    heading: 'Update TI Connect CE, then connect again',
+    sub: "Windows won't let this page use the calculator yet.",
+    steps: [
+      `${TI_LINK('Download the latest TI Connect CE from TI')} and run the installer. Already on the latest? Uninstall it, then install it again.`,
+      '<strong>If TI Connect CE opens, close it.</strong> We can\'t reach the calculator while it\'s open.',
+      'Unplug the calculator, then plug it back in.',
+    ],
+  },
+};
+function viewWinFix(kind) {
+  const fix = WIN_FIX[kind];
   paint(`
-    <div class="cec-hero"><img src="${ART}" alt="" width="280" height="112"></div>
-    <h2>Is TI Connect CE installed on this computer?</h2>
-    <p class="cec-sub">On Windows, we can only find your calculator once TI Connect CE, TI's software, is installed.</p>
-    <div class="cec-actions cec-actions-pair">
-      <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-have">Yes, it's installed</button></div>
-      <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius is-secondary" id="cec-need">No, or I'm not sure</button></div>
-    </div>
-  `, 0, 'win_check');
-  $('#cec-have').onclick = viewConnect;
-  $('#cec-need').onclick = viewInstallTIConnect;
-}
-function viewInstallTIConnect() {
-  paint(`
-    <h2>Install TI Connect CE first</h2>
-    <p class="cec-sub">Without it, your calculator won't show up when you press Connect.</p>
+    <h2>${fix.heading}</h2>
+    <p class="cec-sub">${fix.sub}</p>
     <div class="cec-do">
-      <ol>
-        <li><a href="${TICONNECT_URL}" target="_blank" rel="noopener nofollow">Download TI Connect CE from TI</a> and run the installer.</li>
-        <li>If you open TI Connect CE, <strong>close it</strong> before you carry on. We can't reach the calculator while it's open.</li>
-        <li>Come back to this tab.</li>
+      <ol>${fix.steps.map(step => `
+        <li>${step}</li>`).join('')}
       </ol>
     </div>
-    <div class="cec-actions">
-      <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-installed">It's installed</button></div>
-    </div>
-  `, 0, 'win_install');
-  $('#cec-installed').onclick = viewConnect;
+    ${connectButton()}
+    ${pickerHint()}
+  `, 0, `win_${kind}`);
+  wireConnect();
 }
+const viewInstallTIConnect = () => viewWinFix('install');
+
 function viewConnect() {
   const usb = !!navigator.usb;
   const win = onWindows();
@@ -558,24 +658,37 @@ function viewConnect() {
           : onChromeOS() ? '' : `<li>Quit TI Connect CE if it is open on your computer. We can't reach the calculator while it's open.</li>`}
       </ol>
     </div>
-    <div class="cec-actions">
-      <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-go"${usb ? '' : ' disabled'}>Connect calculator</button></div>
-    </div>
+    ${connectButton()}
+    ${usb ? pickerHint() : ''}
     <p class="cec-why">Different OS versions need different jailbreaks. We check your calculator and install the right one.</p>
+    <p class="cec-why">No calculator with you? The <a href="${WRITTEN}"${writtenAttrs()}>manual steps</a> are below.</p>
     ${usb ? '' : '<p class="cec-why">Direct USB needs Chrome or Edge on a computer. The manual installation below uses TI Connect CE instead.</p>'}
   `, 0, 'connect');
-  if (!usb) return;
+  if (!usb) { $('#cec-go').disabled = true; return; }
+  wireConnect();
+}
+
+// The Connect button, on the Connect screen and on the Windows screens. Its
+// first press in a page load counts as ce_step connect_click. A link that died
+// is dropped and the device list opens again (connectAfresh): no reload.
+function wireConnect() {
   $('#cec-go').onclick = () => work(async () => {
+    trackStep('connect_click');
     say('Pick your calculator in the browser window that opens.');
     // transport.link changes only once the device list has returned a calculator.
     const before = transport.link;
     try {
-      state.info = transport.info && !transport.poisoned ? transport.info : await transport.connect({ beforeOpen: claim });
+      state.info = transport.info && !transport.poisoned ? transport.info : await connectAfresh(transport, { beforeOpen: claim });
     } catch (err) {
       if (transport.link === before) markPicker(err);
       // A calculator picked this time that is not a CE reports its USB product id.
       trackConnectFail(err, {}, transport.link === before ? undefined : transport.link?.device);
-      throw err;
+      const next = connectFailScreen({ reason: installerFailReason(err), detail: openDetail(err), windows: onWindows(), screen: state.screen });
+      if (!next) throw err;
+      state.lastReason = installerFailReason(err);
+      say('');
+      viewWinFix(next.slice('win_'.length));
+      return;
     }
     if (!state.reportedInfo) {
       state.reportedInfo = true;
@@ -611,10 +724,27 @@ function viewNative() {
     <p class="cec-sub">Games already run on OS ${esc(state.info.os)}.</p>
     ${sendActions()}
     <div id="cec-howto"><p>${lead}</p>${walk(early ? 'ce-jb-native-asm' : 'ce-jb-native-game')}</div>
+    ${offersOs540(state.info.os) ? os540Box() : ''}
     ${gamesActions()}
   `, 1, 'native');
   wireSends();
+  const tiplanet = $('#cec-os540-get');
+  if (tiplanet) tiplanet.addEventListener('click', () => trackStep('native_os540'));
 }
+
+// OS 5.2 and earlier only: the other way, updating to OS 5.4.0, where games
+// start from prgm with no Asm(. Exactly 5.4.0: from 5.5 on, assembly needs a
+// jailbreak. The OS file is TI's; the student gets it from TI-Planet's archive
+// and sends it with TI Connect CE. Never offered to any other version.
+const os540Box = () => `
+    <div class="cec-os540">
+      <p><strong>Or update to OS 5.4.0.</strong> On 5.4.0, games start from the ${keyHelpHtml('cec')} menu, with no Asm(.</p>
+      <ol>
+        <li><a id="cec-os540-get" href="${OS_540_URL}" target="_blank" rel="noopener nofollow">Download OS 5.4.0 from TI-Planet</a>. Get 5.4.0 exactly: on OS 5.5 or later, games need a jailbreak.</li>
+        <li>Send it to the calculator with TI Connect CE. Back up any programs you want to keep first.</li>
+        <li>Press Start over and connect again.</li>
+      </ol>
+    </div>`;
 
 // v3 installs through Inequalz, so the app list is read before the RAM reset:
 // nobody should erase their programs and only then find out they are stuck.
@@ -986,9 +1116,17 @@ const handoff = tabHandoff({
     if (transport.link) transport.poisoned = true;
     playLink = null;
     await Promise.all(links.map(l => l?.close().catch(() => {})));
-    say('Another tab is using the calculator now. To carry on here, close that tab and reload this page.');
+    lost('Another tab is using the calculator now. Close that tab.');
   },
 });
+// The link was dropped under the student: on Connect the button asks again;
+// on the steps after it, the band's connect again does; once the install is
+// in, the Send buttons pick the calculator themselves.
+function lost(lead) {
+  if (state.step === 0) say(`${lead} Then press Connect calculator.`);
+  else if (state.step >= 3 || state.busy || state.screen === 'native') say(lead);
+  else lostBand(lead);
+}
 async function claim() {
   if ((await handoff.claim()) === 'busy') throw refusal('TAB_BUSY', TAB_BUSY_TEXT);
 }
@@ -1041,7 +1179,7 @@ function viewPlay() {
   if (BACK) return viewBack('');
   paint(`
     <h2>Put a game on it</h2>
-    <p class="cec-sub">Send Snake to see it work.</p>
+    <p class="cec-sub">Press <kbd>clear</kbd> until the home screen shows, then send Snake.</p>
     ${sendActions()}
     <div id="cec-howto"><p>Games start from the ${keyHelpHtml('cec')} menu.</p>${walk('ce-jb-v3-game')}</div>
     ${gamesActions()}
@@ -1065,12 +1203,36 @@ function viewBack(lead) {
 // On a Chromebook the browser is Chrome already, so no WebUSB there reads as
 // USB turned off (as on some school Chromebooks), not as the wrong browser.
 const CHROMEOS_NO_USB = ['The installer can\'t use USB on this Chromebook', 'Some school Chromebooks don\'t let websites use USB devices. Try a Windows or Mac computer.'];
-function unavailable(message) {
+// A phone or tablet can't do this at all; a computer only needs the other
+// browser, so it gets the page's address to copy (only where the clipboard
+// API exists). Its press counts once as ce_step no_webusb_copy.
+const NO_USB = {
+  chromeos: CHROMEOS_NO_USB,
+  mobile: ['The installer needs a computer', 'Do this on a computer with Chrome or Edge.'],
+  computer: ['The installer needs Chrome or Edge', 'Open this page in Chrome or Edge.'],
+};
+function unavailable(kind = onChromeOS() ? 'chromeos' : noUsbKind(navigator)) {
   trackStep('no_webusb');
-  const [title, text] = onChromeOS() ? CHROMEOS_NO_USB : ['The installer needs Chrome or Edge', message];
+  state.screen = 'no_webusb';
+  const [title, text] = NO_USB[kind];
+  const copy = kind === 'computer' && !!navigator.clipboard?.writeText;
+  const manual = `<div class="wp-block-button"><a class="wp-block-button__link no-border-radius${copy ? ' is-secondary' : ''}" href="${WRITTEN}"${writtenAttrs()}>Manual installation</a></div>`;
   root().innerHTML = `<section class="cec-card"><h2>${esc(title)}</h2>
     <p>${esc(text)}</p>
-    <div class="cec-actions"><div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${WRITTEN}"${writtenAttrs()}>Manual installation</a></div></div></section>`;
+    <div class="cec-actions${copy ? ' cec-actions-pair' : ''}">${copy ? `
+      <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-copy">Copy link</button></div>` : ''}
+      ${manual}</div>
+    <p class="cec-status" role="status" aria-live="polite" id="cec-status"></p></section>`;
+  if (!copy) return;
+  $('#cec-copy').onclick = async () => {
+    trackStep('no_webusb_copy');
+    try {
+      await navigator.clipboard.writeText(location.origin + location.pathname);
+      say('Link copied. Paste it into the address bar in Chrome or Edge.');
+    } catch {
+      say(`Copy this address into Chrome or Edge: ${location.origin + location.pathname}`);
+    }
+  };
 }
 
 // --- The manual installation under the wizard ------------------------------
@@ -1165,8 +1327,12 @@ function mountGuide() {
 //   &win=1, &cros=1 Windows or Chrome OS wording
 const PREVIEW_SCREENS = {
   connect: ['5.8.5', viewConnect],
-  'win-check': ['5.8.5', viewWindowsCheck],
-  'win-install': ['5.8.5', viewInstallTIConnect],
+  'win-install': ['5.8.5', () => viewWinFix('install')],
+  'win-nodevice': ['5.8.5', () => viewWinFix('nodevice')],
+  'win-security': ['5.8.5', () => viewWinFix('security')],
+  'no-webusb': ['5.8.5', () => unavailable('computer')],
+  'no-webusb-mobile': ['5.8.5', () => unavailable('mobile')],
+  'native-52': ['5.2.2.0043', viewNative],
   'route-v21': ['5.8.4.0058', viewRoute],
   'route-v3': ['5.8.5', viewRoute],
   'route-unsupported': ['5.9.0.0000', viewRoute],
@@ -1234,7 +1400,7 @@ function boot() {
   // Before the WebUSB check: a preview may load in a frame, which has no WebUSB.
   if (installPreview()) return;
   if (!navigator.usb) {
-    unavailable('Sending files straight to a calculator only works in Chrome or Edge on a computer. The manual installation below uses TI Connect CE instead.');
+    unavailable();
     return;
   }
   // Release the calculator on leaving, so the games hub in the same tab can open it.
@@ -1245,11 +1411,11 @@ function boot() {
   navigator.usb.addEventListener('disconnect', e => {
     if (e.device === transport.device && !transport.poisoned) {
       transport.poisoned = true;
-      say('The calculator was unplugged. Plug it back in and reload this page.');
+      lost('The calculator was unplugged. Plug it back in.');
     }
     handoff.held(holds());
   });
-  if (onWindows()) viewWindowsCheck(); else viewConnect();
+  viewConnect();
 }
 
 boot();
