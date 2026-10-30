@@ -40,6 +40,7 @@ import {
   openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, baseOf, needsAsm, sendOutcome, stallLog, stallText, stallDetail, modal,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
+import * as SC from './sendconnect.mjs';
 
 // The script tag can set the page up for markup other than this site's own:
 // data-ce-page (hub, game or math, instead of reading it from the path),
@@ -292,6 +293,8 @@ const lostText = () => (page === 'math' ? LOST_TEXT_MATH : LOST_TEXT);
 // reset; a connect that times out after one is the same silence. Counted per
 // tab in sessionStorage.
 const stalls = stallLog(() => window.sessionStorage);
+// Connect v2: a failed connect's fix in the card (sendconnect.mjs), or null for the usual words.
+const fixHtml = (err, where, file = '', label = '') => SC.failPanel(err, { where, page, win: WIN, cros: CROS, installerTab: wentToInstaller, file, label, dl: file ? failDownload(file, err) : '', setup: SETUP });
 const OUTCOME_TEXT = {
   no_device: "No calculator was picked. Make sure it's plugged in and turned on, then try again. Not in the list? Try a different USB cable; charge-only cables won't work.",
   open_failed: "Couldn't connect. Close anything else using the calculator (like TI Connect CE or another tab), unplug it and plug it back in, then try again.",
@@ -383,14 +386,13 @@ async function connect(say, { quiet = false } = {}) {
     parked = false;
     parkedFor = '';
   }
-  if (!quiet && !(await askTIConnect())) throw refusal('CANCELLED', 'The TI Connect CE question was dismissed.');
   // Started, not awaited: the picker needs the click's permission, so nothing
   // is awaited before it.
   const pending = page === 'math' && deleteOn() && byContent() ? loadOwn() : null;
   say(present ? 'Connecting to your calculator…' : 'Select your calculator in the popup…');
   let l;
   try {
-    l = await pickCalculator();
+    l = await pickCalculator({ usb: SC.timedUsb() });
     // After the picker, which needs the click's permission: a calculator
     // another tab holds is one this site was allowed, so no picker shows.
     if (!quiet && (await handoff.claim()) === 'busy') throw refusal('TAB_BUSY', TAB_BUSY_TEXT);
@@ -407,11 +409,11 @@ async function connect(say, { quiet = false } = {}) {
     stalls.note(err, { connecting: true });
     // The picked device, when there was one: a calculator that is not a CE
     // reports its USB product id.
-    if (!quiet) trackConnectFail(err, { page }, l?.device);
+    if (!quiet) trackConnectFail(err, { page, ...SC.noteFail(err, { cros: CROS }) }, l?.device);
     throw err;
   }
   link = l;
-  track('ce_calc_info', { ...calcParams(calc), route: calc.route, page, jb: jailbreakState(calc.route, calc.tools) });
+  track('ce_calc_info', { ...calcParams(calc), route: calc.route, page, jb: jailbreakState(calc.route, calc.tools), ...SC.pickerParams() });
   await announceContents({ fresh: false });
   refreshPresent();
   return calc;
@@ -677,7 +679,7 @@ async function run({ file, label, say, show }) {
     // every message on a game the calculator has: its main button is Delete.
     const again = asksSendAgain(err)
       || (deleteOn() && link && calc ? await gameOnCalculator(file, label, calc.rows, { fetchGame: page === 'game' }).catch(() => false) : false);
-    const text = `<p>${errorHtml(err)}${again ? ` ${SEND_AGAIN_HTML}` : ''}</p>${failDownload(file, err)}`;
+    const text = fixHtml(err, page === 'game' ? 'game' : 'card', file, label) ?? `<p>${errorHtml(err)}${again ? ` ${SEND_AGAIN_HTML}` : ''}</p>${failDownload(file, err)}`;
     if (games) {
       const list = spaceList({ memory, lastReason: failReason(err), sending: file, sendingLabel: label, games, calc: refusedBy, say, show });
       list.wire(show(text + list.html, 'bad'));
@@ -1207,7 +1209,7 @@ function mountGame() {
   card.setAttribute('role', 'status');
   card.innerHTML = `
     <p class="msg ce-leaf-msg"></p>
-    <div class="ce-leaf-actions"></div>
+    <div class="ce-leaf-actions"></div>${SC.hintHtml(SETUP)}
     <p class="msg sub ce-leaf-progress" aria-live="polite"></p>
     <div class="ce-leaf-result" hidden></div>`;
   if (!built) (a.closest('.wp-block-button') || a).after(card);
@@ -1244,7 +1246,7 @@ function mountGame() {
       return;
     }
     clearResult();
-    await connectFromClick(say, err => show(`<p>${errorHtml(err)}</p>${failDownload(file, err)}`, 'bad'));
+    await connectFromClick(say, err => show(fixHtml(err, 'game', file, label) ?? `<p>${errorHtml(err)}</p>${failDownload(file, err)}`, 'bad'));
     say('');
   };
   const remove = () => removeGame({ file, label, say, show });
@@ -1256,6 +1258,7 @@ function mountGame() {
   result.addEventListener('click', e => {
     if (e.target.closest('.ce-close')) clearResult();
     else if (e.target.closest('.ce-send-again')) send();
+    else if (e.target.closest('.ce-connect-again')) go();
   });
   let mode = '';
   const here = presence(file, label, () => paint(), { fetchGame: true });
@@ -1289,6 +1292,7 @@ function mountGame() {
       }
     }
     actions.querySelectorAll('button').forEach(b => { b.disabled = busy || connecting; });
+    SC.showHint(card, !connected && !gated && outcome !== 'bad');
   };
   listeners.add(paint);
   changed();
@@ -1377,13 +1381,13 @@ function mountPanel(before, where) {
       return;
     }
     panel.innerHTML = `<p class="msg">${statusHtml(where)}</p>
-      ${panelError ? `<p class="msg err">${panelError}</p>` : ''}
-      <button type="button" class="ce-conn-go"${busy ? ' disabled' : ''}>Connect your calculator</button>`;
+      ${panelError ? SC.errBlock(panelError) : ''}
+      <button type="button" class="ce-conn-go"${busy ? ' disabled' : ''}>${SC.panelButton(panelError)}</button>${panelError ? '' : SC.hintHtml(SETUP)}`;
     const button = panel.querySelector('.ce-conn-go');
     button.onclick = () => {
       if (busy) return;
       panelError = '';
-      connectFromClick(t => { button.textContent = t; button.disabled = true; }, err => { panelError = errorHtml(err); }, { repaint: false });
+      connectFromClick(t => { button.textContent = t; button.disabled = true; }, err => { panelError = fixHtml(err, 'panel') ?? errorHtml(err); }, { repaint: false });
     };
   });
 }
@@ -1549,7 +1553,7 @@ function mount() {
   // cable and for other work.
   listeners.add(followSpaceLists);
   // Send again inside a message waits for other work, like the card's own buttons.
-  listeners.add(() => document.querySelectorAll('.ce-send-again').forEach(b => { b.disabled = busy || connecting; }));
+  listeners.add(() => document.querySelectorAll('.ce-send-again, .ce-connect-again').forEach(b => { b.disabled = busy || connecting; }));
   // Last, so it runs after the panels repaint: a box whose key was painted
   // away closes, one whose key moved follows it.
   const keyHelp = mountKeyHelp('ce', { onOpen: () => track('ce_key_help', { page }) });

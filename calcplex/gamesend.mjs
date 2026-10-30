@@ -130,7 +130,7 @@ export function readyEach(link) {
   };
 }
 
-/** { model, os, route, ramFree, archiveFree }, refusing anything but a CE. */
+/** { model, os, boot, route, ramFree, archiveFree, home }, refusing anything but a CE. */
 export async function identify(link) {
   const info = await link.info();
   // The USB id too, so this gate matches the installer's (checkCalculator).
@@ -139,7 +139,7 @@ export async function identify(link) {
     throw refusal('OTHER_MODEL', `This is a ${shown || 'calculator this page does not know'}. These files are for the TI-84 Plus CE.`, { model: info.productName });
   }
   return {
-    model: info.productName, os: info.osVersion, route: compatibility(info.osVersion),
+    model: info.productName, os: info.osVersion, boot: info.bootVersion, route: compatibility(info.osVersion),
     ramFree: info.ramFree, archiveFree: info.archiveFree, home: info.atHomescreen,
   };
 }

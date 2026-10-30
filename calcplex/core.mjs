@@ -830,12 +830,15 @@ export function refusedAt(err) {
 // `home` is 1 when the calculator was on its home screen at connect. Free
 // RAM and archive go in whole KB, rounded down, and only when read. `retried`
 // is 1 when free RAM first read 0 and was read again (gamesend.freeRamAgain);
-// a second 0 is unknown and sends no evo_ram_free.
+// a second 0 is unknown and sends no evo_ram_free. `ce_boot` is the boot code's
+// version as the calculator reports it (5.0.0.0089, 5.8.4.0058), sent only in
+// that shape.
 const freeKB = bytes => (Number.isFinite(bytes) && bytes >= 0 ? Math.floor(bytes / 1024) : undefined);
-export function calcParams({ os, model, home, ramFree, archiveFree, reread }) {
+const BOOT = /^\d{1,3}\.\d{1,3}\.\d{1,3}(\.\d{4})?$/;
+export function calcParams({ os, model, home, ramFree, archiveFree, reread, boot }) {
   const ram = freeKB(ramFree), arch = freeKB(archiveFree);
   return {
-    evo_os: os, evo_hw: model, ...(home === undefined ? {} : { home: home ? 1 : 0 }),
+    evo_os: os, evo_hw: model, ...(typeof boot === 'string' && BOOT.test(boot) ? { ce_boot: boot } : {}), ...(home === undefined ? {} : { home: home ? 1 : 0 }),
     ...(ram === undefined ? {} : { evo_ram_free: ram }), ...(arch === undefined ? {} : { evo_arch_free: arch }),
     ...(reread ? { retried: 1 } : {}),
   };

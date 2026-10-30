@@ -60,6 +60,7 @@ export class CETransport {
     });
     this.info = {
       ...checkCalculator(calc.productName, calc.osVersion, { productNumber: calc.productNumber, usbProductId: this.device?.productId }), home: calc.atHomescreen, ramFree: calc.ramFree, archiveFree: calc.archiveFree,
+      ...(calc.bootVersion ? { boot: calc.bootVersion } : {}),
       ...(calc.reread ? { reread: true } : {}),
     };
     return this.info;
