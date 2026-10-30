@@ -117,10 +117,9 @@ const WORDS = {
 const words = setup => WORDS[setup?.ceVoice === 'quick' ? 'quick' : 'plain'];
 
 /** The picture and its two lines, under a Connect button before any device list. */
-export function hintHtml(setup, picture = PICTURE) {
+export function hintHtml(setup) {
   const [pick, cable] = words(setup).hint;
-  return `<figure class="ce-hint"><img src="${esc(picture)}" alt="${esc(PICTURE_ALT)}" width="64" height="64" decoding="async">`
-    + `<figcaption><span>${esc(pick)}</span> <span>${esc(cable)}</span></figcaption></figure>`;
+  return `<p class="ce-hint"><span>${esc(pick)}</span> <span>${esc(cable)}</span></p>`;
 }
 
 /** Shows or hides the hint inside `root` (a game page's card). */
