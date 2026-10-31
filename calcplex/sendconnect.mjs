@@ -3,8 +3,8 @@
 //
 // Connect help for "Send to calculator" on the TI-84 Plus CE download pages
 // (ce-send.mjs), second version:
-//   - before the first device list: a picture of the list and one line on
-//     what to click in it, and one on the cable (hintHtml);
+//   - before the first device list: one line on what to click in it, and
+//     one on the cable (hintHtml);
 //   - how long the device list stayed open, and whether a calculator this
 //     site was allowed was plugged in when it closed with nothing picked
 //     (timedUsb, pickerParams), on ce_connect_fail and ce_calc_info;
@@ -19,12 +19,6 @@
 // behave that way (previewUsb), so each panel can be seen without a calculator.
 import { CELink, EVO_PRODUCT_ID, TI_VENDOR_ID } from '../celink.mjs';
 import { PREVIEW_HOST, TICONNECT_URL, esc, failReason, openDetail } from './core.mjs';
-
-// The device list as the browser draws it, served beside this module (same
-// version query, so a new picture is never mixed with an old page).
-const here = new URL(import.meta.url);
-export const PICTURE = new URL('./picker.webp', here).pathname + here.search;
-const PICTURE_ALT = "The browser's device list: the calculator's name selected, and the Connect button";
 
 // The words, by the site's voice: data-ce-voice="quick" on the script tag
 // for the quick one, the plain one otherwise.
@@ -116,7 +110,7 @@ const WORDS = {
 };
 const words = setup => WORDS[setup?.ceVoice === 'quick' ? 'quick' : 'plain'];
 
-/** The picture and its two lines, under a Connect button before any device list. */
+/** What to click in the device list and the cable line, under a Connect button before any device list. */
 export function hintHtml(setup) {
   const [pick, cable] = words(setup).hint;
   return `<p class="ce-hint"><span>${esc(pick)}</span> <span>${esc(cable)}</span></p>`;
@@ -209,7 +203,6 @@ export function failKind(err, { win = false, cros = false, installerTab = false,
 
 const tiLink = text => `<a href="${TICONNECT_URL}" target="_blank" rel="noopener nofollow">${esc(text)}</a>`;
 const steps = list => `<ol>${list.map(s => `<li>${s(tiLink)}</li>`).join('')}</ol>`;
-const picture = (caption, src) => `<figure class="ce-fix-pic"><img src="${esc(src)}" alt="${esc(PICTURE_ALT)}" width="120" height="120" decoding="async"><figcaption>${esc(caption)}</figcaption></figure>`;
 
 /**
  * A failed connect's fix as HTML for the card it failed in, or null to keep
@@ -225,18 +218,17 @@ export function failPanel(err, ctx = {}) {
   const kind = failKind(err, { ...ctx, twin: !!twin });
   if (!kind) return null;
   const w = words(setup);
-  const src = ctx.picture ?? PICTURE;
   const again = where === 'game' ? `<p class="ce-fix-go"><button type="button" class="ce-connect-again">${esc(w.again)}</button></p>`
     : where === 'card' ? `<p class="ce-fix-go"><button type="button" class="ce-send-again">${esc(w.again)}</button></p>` : '';
   const box = (body, { retry = true } = {}) => `<div class="ce-fix" data-fix="${kind}"${retry ? ' data-again' : ''}>${body}${retry ? again : ''}</div>`;
   switch (kind) {
     case 'win_nodevice': {
       const t = w.winNoDevice;
-      return box(`<p><strong>${esc(t.lead)}</strong> ${esc(t.why)}</p>${steps(t.steps)}${picture(t.pick, src)}<p>${esc(t.cable)}</p>`) + dl;
+      return box(`<p><strong>${esc(t.lead)}</strong> ${esc(t.why)}</p>${steps(t.steps)}<p><strong>${esc(t.pick)}</strong></p><p>${esc(t.cable)}</p>`) + dl;
     }
     case 'nodevice': {
       const t = w.noDevice;
-      return box(`<p><strong>${esc(t.lead)}</strong></p>${picture(t.pick, src)}<p>${esc(t.cable)}</p>`) + dl;
+      return box(`<p><strong>${esc(t.lead)}</strong></p><p><strong>${esc(t.pick)}</strong></p><p>${esc(t.cable)}</p>`) + dl;
     }
     case 'claimed': {
       const t = w.claimed;
