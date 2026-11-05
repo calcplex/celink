@@ -32,7 +32,7 @@ const writtenAttrs = () => (/^https?:/.test(WRITTEN) ? ' target="_blank" rel="no
 const SHELL = document.getElementById('cec-shell')?.dataset || {};
 const LOCAL = PREVIEW_HOST ? new URLSearchParams(location.search) : null;
 const setting = (param, attr, fallback) => (LOCAL?.has(param) ? LOCAL.get(param) : SHELL[attr] || fallback);
-// The Run screen's "Did arTIfiCE open?" and the running-program check before
+// The Run screen's "arTIfiCE didn't open?" link and the running-program check before
 // a v2.1 send (data-runcheck 'on'). Both arms of the AsmHook2 split ask too.
 const RUN_CHECK = setting('runcheck', 'runcheck', 'off') === 'on';
 const GAMES = '/downloads/ti84plusce/games/';
@@ -41,8 +41,6 @@ const GAMES = '/downloads/ti84plusce/games/';
 const BACK = installerReturn(location.search);
 // The connection picture, served beside this module.
 const ART = '/ti84plusce-jailbreak-tutorial/connection.svg';
-// The browser's device list with the calculator picked, served beside it too.
-const PICKER_ART = '/ti84plusce-jailbreak-tutorial/picker.webp';
 // The game the Play screen sends: one assembly program, no C libraries.
 // `name` is the variable inside the file.
 const GAME = { id: 'cec-snake', label: 'Snake', file: '/downloads/ce/SnakeCE.8xg', name: 'SNAKE' };
@@ -54,10 +52,11 @@ const ARCHIVING = 'https://education.ti.com/en/customer-support/knowledge-base/t
 const GAME_WALK = {
   alt: 'Starting a game on a calculator: the prgm menu, the name on the home screen, then the game running',
   steps: [
-    'Press <kbd>prgm</kbd>, arrow to your game, then press <kbd>enter</kbd>. If your calculator\'s model name ends in Python, choose TI-Basic first.',
+    'Press <kbd>prgm</kbd>, arrow to your game, then press <kbd>enter</kbd>.',
     'Its name is on the home screen. Press <kbd>enter</kbd> again.',
   ],
   done: 'The game starts.',
+  note: 'On a Python edition, <kbd>prgm</kbd> first asks TI-Basic or Python. Pick TI-Basic.',
 };
 const WALKS = {
   'ce-jb-reset-ram': {
@@ -105,11 +104,12 @@ const WALKS = {
   'ce-jb-v21-run': {
     alt: 'Running arTIfiCE on a calculator: the prgm menu, prgmA on the home screen, arTIfiCE\'s list of games, then the game running',
     steps: [
-      'Press <kbd>prgm</kbd>, then press <kbd>enter</kbd> on A. If your calculator\'s model name ends in Python, choose TI-Basic first.',
+      'Press <kbd>prgm</kbd>, then press <kbd>enter</kbd> on A.',
       'prgmA is on the home screen. Press <kbd>enter</kbd> again.',
       'arTIfiCE lists your games. Arrow to one and press <kbd>enter</kbd>.',
     ],
     done: 'The game starts.',
+    note: 'On a Python edition, <kbd>prgm</kbd> first asks TI-Basic or Python. Pick TI-Basic.',
   },
 };
 
@@ -120,8 +120,10 @@ const CHEVRON_RIGHT = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidd
 
 // Step HTML is trusted (it carries <kbd>); the alt is escaped. The result is
 // numbered like the steps. Each row carries a chevron so it reads as
-// something to click, and a labelled Next sits under the picture.
-const walk = name => {
+// something to click, and a labelled Next sits under the picture. A walk's
+// `note` (the Python edition's extra question) goes under it, once, never
+// inside a step; the manual installation writes its own (`note: false`).
+const walk = (name, { note = true } = {}) => {
   const w = WALKS[name];
   const n = walkEntries(w).length;
   return `
@@ -136,7 +138,8 @@ const walk = name => {
       <button type="button" class="cec-walk-arrow" aria-label="Previous step" disabled>${CHEVRON_LEFT}</button>
       <p class="cec-walk-count">Step 1 of ${n}</p>
       <button type="button" class="cec-walk-next" aria-label="Next step">Next ${CHEVRON_RIGHT}</button>
-    </div>
+    </div>${note && w.note ? `
+    <p class="cec-walk-note">${w.note}</p>` : ''}
   </div>`;
 };
 
@@ -185,14 +188,16 @@ function mountWalks(scope = root(), { lazy = false } = {}) {
 }
 
 // Every route ends on the games hub, in this tab: the page lets go of the
-// calculator on leaving, so the hub can open it.
-const gamesActions = () => (BACK ? backActions() : `
+// calculator on leaving, so the hub can open it. `secondary`: the screen's
+// main button is another one (Send Snake), so this one is outlined, and a
+// screen has one filled button.
+const gamesActions = ({ secondary = false } = {}) => (BACK ? backActions({ secondary }) : `
     <div class="cec-actions">
-      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${GAMES}">Send more games to your calculator</a></div>
+      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius${secondary ? ' is-secondary' : ''}" href="${GAMES}">See all games</a></div>
     </div>`);
-const backActions = () => `
+const backActions = ({ secondary = false } = {}) => `
     <div class="cec-actions">
-      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${esc(BACK.href)}">Go back to ${esc(BACK.name)}</a></div>
+      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius${secondary ? ' is-secondary' : ''}" href="${esc(BACK.href)}">Go back to ${esc(BACK.name)}</a></div>
     </div>`;
 
 const $ = s => document.querySelector(s);
@@ -297,6 +302,9 @@ function report(choice) {
   const fix = $('#cec-report-fix');
   fix.innerHTML = reportFix(choice) + reportMail();
   fix.hidden = false;
+  // An answer that names Start over shows it (on Connect it waits for a failure).
+  const restart = $('#cec-restart');
+  if (restart && fix.textContent.includes('Start over')) restart.hidden = false;
   const go = fix.querySelector('[data-go="install"]');
   if (go) go.onclick = () => { if (!state.busy) viewInstallTIConnect(); };
   if (state.reported[choice]) return;
@@ -352,11 +360,13 @@ function showManual(on) {
   if (a) a.hidden = !on;
 }
 
-// There is no Back: Start over (a reload) is the one way backwards.
+// There is no Back: Start over (a reload) is the one way backwards. On the
+// first screen it would only reload that screen, so it shows there only
+// after a failure (whose words may name it).
 function foot() {
   return `<div class="cec-report" id="cec-report" hidden></div>
   <div class="cec-foot">
-    <button type="button" id="cec-restart"${state.busy ? ' disabled' : ''}>Start over</button>
+    <button type="button" id="cec-restart"${state.busy ? ' disabled' : ''}${state.screen === 'connect' ? ' hidden' : ''}>Start over</button>
     <button type="button" id="cec-report-open"${state.busy ? ' disabled' : ''} aria-expanded="false" aria-controls="cec-report">Didn't work?</button>
     <a class="cec-manual" href="${manualHref()}"${writtenAttrs()}${state.deadEnd ? '' : ' hidden'}>Manual installation</a>
   </div>`;
@@ -419,12 +429,14 @@ function paint(body, step, screen, { deadEnd = false } = {}) {
     <div class="cec-error" role="alert" id="cec-error" hidden></div>
     ${foot()}</section>`;
   // The status and error bands move under the button they report on: the
-  // last row of actions, or a row marked data-status.
+  // last row of actions, or a row marked data-status (after the device-list
+  // line, which stays right under its Connect button).
   const card = root().querySelector('.cec-card');
   const rows = card.querySelectorAll('.cec-actions');
   if (rows.length) {
     const status = $('#cec-status');
-    (card.querySelector('.cec-actions[data-status]') || rows[rows.length - 1]).insertAdjacentElement('afterend', status);
+    const row = card.querySelector('.cec-actions[data-status]') || rows[rows.length - 1];
+    (row.nextElementSibling?.classList.contains('cec-picker-line') ? row.nextElementSibling : row).insertAdjacentElement('afterend', status);
     status.insertAdjacentElement('afterend', $('#cec-error'));
   }
   $('#cec-restart').onclick = () => { if (!state.busy) location.reload(); };
@@ -508,6 +520,20 @@ function fail(err) {
   say('');
 }
 
+// A band that just appeared must be seen (after fail() and lostBand(), from
+// work(), lost() and the preview): Start over comes back (its words may name
+// it), and if the band is out of the window it scrolls in, the least distance
+// (its scroll-margin keeps it clear of the site's bar).
+function showBand() {
+  const el = $('#cec-error');
+  if (!el || el.hidden) return;
+  const restart = $('#cec-restart');
+  if (restart) restart.hidden = false;
+  const r = el.getBoundingClientRect();
+  const bottom = window.innerHeight || document.documentElement.clientHeight;
+  if (r.top < barBottom() || r.bottom > bottom) el.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+}
+
 // A link that died part way through an install (unplugged, stopped answering,
 // taken by another tab) is picked up again from the screen the student is on:
 // the band's button opens the device list and checks it is the same calculator.
@@ -560,6 +586,7 @@ async function work(fn) {
     await fn();
   } catch (err) {
     fail(err);
+    showBand();
   } finally {
     state.busy = false;
     // Re-enable everything, then let the screen and its walks lock what should stay off.
@@ -592,13 +619,10 @@ let forceWindows = false, forceChromeOS = false;
 const onWindows = () => forceWindows || isWindows(navigator);
 const onChromeOS = () => forceChromeOS || isChromeOS(navigator);
 
-// What the device list looks like, under every Connect button: the picture
-// is the list as the browser draws it, the caption the one thing to do in it.
+// The one thing to do in the device list, as one line right under every
+// Connect button. No picture of the list (too small to read).
 const pickerHint = () => `
-    <figure class="cec-picker">
-      <img src="${PICKER_ART}" alt="The browser's device list: the calculator's name selected, and the Connect button" width="220" height="220" decoding="async">
-      <figcaption>In the list that opens, click your calculator, then Connect.</figcaption>
-    </figure>`;
+    <p class="cec-picker-line">In the list that opens, click your calculator, then Connect.</p>`;
 const connectButton = () => `
     <div class="cec-actions">
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-go">Connect calculator</button></div>
@@ -639,11 +663,9 @@ function viewWinFix(kind) {
   paint(`
     <h2>${fix.heading}</h2>
     <p class="cec-sub">${fix.sub}</p>
-    <div class="cec-do">
-      <ol>${fix.steps.map(step => `
-        <li>${step}</li>`).join('')}
-      </ol>
-    </div>
+    <ol class="cec-do">${fix.steps.map(step => `
+      <li>${step}</li>`).join('')}
+    </ol>
     ${connectButton()}
     ${pickerHint()}
   `, 0, `win_${kind}`);
@@ -655,20 +677,15 @@ function viewConnect() {
   const usb = !!navigator.usb;
   const win = onWindows();
   paint(`
-    <div class="cec-hero"><img src="${ART}" alt="" width="280" height="112"></div>
-    <h2>Connect your calculator</h2>
-    <div class="cec-do">
-      <ol>
-        <li>Plug the CE into this computer with its charging cable and turn it on.</li>
-        ${win
-          ? `<li><strong>Close TI Connect CE.</strong> We can't reach the calculator while it's open.</li>`
-          : onChromeOS() ? '' : `<li>Quit TI Connect CE if it is open on your computer. We can't reach the calculator while it's open.</li>`}
-      </ol>
+    <div class="cec-head">
+      <img class="cec-head-art" src="${ART}" alt="" width="280" height="112">
+      <h2>Connect your calculator</h2>
     </div>
+    <p class="cec-lead">Plug the CE into this computer with the USB cable that came with it and turn it on.${win
+      ? " <strong>Close TI Connect CE</strong> if it's open, or we can't reach the calculator."
+      : onChromeOS() ? '' : " Quit TI Connect CE if it's open on this computer, or we can't reach the calculator."}</p>
     ${connectButton()}
     ${usb ? pickerHint() : ''}
-    <p class="cec-why">Different OS versions need different jailbreaks. We check your calculator and install the right one.</p>
-    <p class="cec-why">No calculator with you? The <a href="${WRITTEN}"${writtenAttrs()}>manual steps</a> are below.</p>
     ${usb ? '' : '<p class="cec-why">Direct USB needs Chrome or Edge on a computer. The manual installation below uses TI Connect CE instead.</p>'}
   `, 0, 'connect');
   if (!usb) { $('#cec-go').disabled = true; return; }
@@ -732,7 +749,7 @@ function viewNative() {
     ${sendActions()}
     <div id="cec-howto"><p>${lead}</p>${walk(early ? 'ce-jb-native-asm' : 'ce-jb-native-game')}</div>
     ${offersOs540(state.info.os) ? os540Box() : ''}
-    ${gamesActions()}
+    ${gamesActions({ secondary: true })}
   `, 1, 'native');
   wireSends();
   const tiplanet = $('#cec-os540-get');
@@ -753,6 +770,12 @@ const os540Box = () => `
       </ol>
     </div>`;
 
+// A file input drawn as an outlined button, in the same family as the rest
+// (the browser's own "Choose File" control looked like nothing else here).
+// The input stays in the page, focusable, with the full words as its name.
+const fileButton = (id, accept, name) => `
+      <label class="cec-file-btn"><input type="file" id="${id}" accept="${accept}" aria-label="${name}"><span class="wp-block-button__link no-border-radius is-secondary" aria-hidden="true">Choose File</span></label>`;
+
 // v3 installs through Inequalz, so the app list is read before the RAM reset:
 // nobody should erase their programs and only then find out they are stuck.
 // The app is not hosted here; the student downloads it from TI.
@@ -770,18 +793,15 @@ function checkInequalz() {
 function viewNoInequalz() {
   paint(`
     <h2>First, install Inequality Graphing on your calculator</h2>
-    <div class="cec-do">
-      <ol>
-        <li><strong>Click Get Inequality Graphing from TI</strong> and download the app from TI's page. The file ends in <code>.8ek</code> and usually lands in your Downloads folder.</li>
-        <li><strong>Come back to this tab and click Choose File.</strong> Pick the <code>.8ek</code> file you downloaded, then click Send the app.</li>
-      </ol>
-    </div>
-    <div class="cec-actions" style="margin-bottom:18px">
-      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${INEQUALZ_URL}" target="_blank" rel="noopener nofollow">Get Inequality Graphing from TI</a></div>
-    </div>
-    <label class="cec-file-input">Choose the .8ek file you downloaded
-      <input type="file" id="cec-app" accept=".8ek"></label>
+    <ol class="cec-do">
+      <li><strong>Click Get Inequality Graphing from TI</strong> and download the app from TI's page. The file ends in <code>.8ek</code> and usually lands in your Downloads folder.</li>
+      <li><strong>Come back to this tab and click Choose File.</strong> Pick the <code>.8ek</code> file you downloaded, then click Send the app.</li>
+    </ol>
     <div class="cec-actions">
+      <div class="wp-block-button"><a class="wp-block-button__link no-border-radius is-secondary" href="${INEQUALZ_URL}" target="_blank" rel="noopener nofollow">Get Inequality Graphing from TI</a></div>
+    </div>
+    <div class="cec-actions">
+      ${fileButton('cec-app', '.8ek', 'Choose the .8ek file you downloaded')}
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-send-app" disabled>Send the app</button></div>
     </div>
     <p class="cec-why">arTIfiCE v3 installs through TI's Inequality Graphing app, Inequalz. Your calculator doesn't have it installed.</p>
@@ -830,13 +850,11 @@ function viewInequalzUnsure() {
   paint(`
     <h2>Check for Inequalz on the calculator</h2>
     <p class="cec-sub">The app list came back empty, so check by hand.</p>
-    <div class="cec-do">
-      <ol>
-        <li><strong>Press <kbd>apps</kbd>.</strong> Look for Inequalz in the list.</li>
-        <li><strong>If it is not there, <a href="${INEQUALZ_URL}" target="_blank" rel="noopener nofollow">get it from TI</a>
-          and send it with TI Connect CE before you carry on.</strong></li>
-      </ol>
-    </div>
+    <ol class="cec-do">
+      <li><strong>Press <kbd>apps</kbd>.</strong> Look for Inequalz in the list.</li>
+      <li><strong>If it is not there, <a href="${INEQUALZ_URL}" target="_blank" rel="noopener nofollow">get it from TI</a>
+        and send it with TI Connect CE before you carry on.</strong></li>
+    </ol>
     <div class="cec-actions">
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">Inequalz is on the calculator</button></div>
       <button type="button" id="cec-recheck" class="cec-plain">Check again</button>
@@ -874,11 +892,10 @@ function filesScreen({ files, heading, lead = '', action, also = '', tag, step, 
         pick it here.</p>
       <ul class="cec-files" id="cec-filelist">${files.map(f => `
         <li data-file="${esc(f.file)}"><span class="cec-name">${esc(f.file)}</span><span class="cec-state"></span></li>`).join('')}</ul>
-      <div class="cec-actions" style="margin-bottom:18px;margin-top:0">
-        <div class="wp-block-button"><a class="wp-block-button__link no-border-radius" href="${RELEASE(tag)}" target="_blank" rel="noopener nofollow">Open the ${esc(tag)} release page</a></div>
+      <div class="cec-actions" style="margin-bottom:14px;margin-top:0">
+        <div class="wp-block-button"><a class="wp-block-button__link no-border-radius is-secondary" href="${RELEASE(tag)}" target="_blank" rel="noopener nofollow">Open the ${esc(tag)} release page</a></div>
+        ${fileButton('cec-pick', '.8xp,.8xv', 'Choose the file you downloaded')}
       </div>
-      <label class="cec-file-input">Choose the file you downloaded
-        <input type="file" id="cec-pick" accept=".8xp,.8xv"></label>
     </div>
     <div class="cec-actions">
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next" disabled>${action}</button></div>${also}
@@ -1033,41 +1050,46 @@ function viewV21Run({ snake, only = false }) {
     ${walk('ce-jb-v21-run')}
     <p>Whenever you want to play: ${keyHelpHtml('cec')}, run A, pick the game. Press <kbd>${LEAVE_SHELL_KEY}</kbd> to leave arTIfiCE.</p>
     ${RUN_CHECK ? checkBlock('plain') : ''}
-    ${gamesActions()}
+    ${gamesActions({ secondary: !snake })}
   `, 3, runScreen({ snake, only }));
   if (!snake) wireSends();
   if (RUN_CHECK) wireCheck('plain');
 }
 
 
-// "Did arTIfiCE open?" under the Run walk: two buttons, each answer counted
-// once per page load as ce_step (screen v21_check or v21_hook_check, outcome
-// yes or no). No lists the likely causes.
+// Under the Run walk. Plain route: one quiet link, "arTIfiCE didn't open?",
+// that lists the likely causes and counts ce_step screen v21_check outcome no
+// once per page load (v21_check yes is no longer sent).
+// With AsmHook2 (keys builds): "Did it say AsmHook2 is on?", two buttons,
+// each answer counted once per page load as v21_hook_check yes or no.
 const CHECKS = {
   plain: {
     screen: 'v21_check',
-    question: 'Did arTIfiCE open?',
-    yes: () => 'Arrow to a game and press enter.',
+    link: "arTIfiCE didn't open?",
     no: () => [
       'No A after you press prgm? Press Start over and send arTIfiCE again.',
-      'You see A\'s code? That is the EDIT tab. Press quit, then prgm, and pick A under EXEC.',
       'prgmA is still on the home screen? Press enter.',
       'On a Python edition, prgm asks for TI-Basic or Python first. Choose TI-Basic.',
     ],
   },
 };
-const checkBlock = kind => `
+const checkBlock = kind => (CHECKS[kind].link ? `
+    <div class="cec-check cec-check-link" id="cec-check">
+      <p><button type="button" class="cec-check-open" data-answer="no" aria-expanded="false" aria-controls="cec-check-fix">${CHECKS[kind].link}</button></p>
+      <div class="cec-check-fix" id="cec-check-fix" hidden></div>
+    </div>` : `
     <div class="cec-check" id="cec-check">
       <p class="cec-check-q">${CHECKS[kind].question}</p>
       <div class="cec-report-choices"><button type="button" data-answer="yes">Yes</button><button type="button" data-answer="no">No</button></div>
       <div class="cec-check-fix" id="cec-check-fix" hidden></div>
-    </div>`;
+    </div>`);
 function wireCheck(kind) {
   const box = $('#cec-check');
   box?.querySelectorAll('[data-answer]').forEach(b => {
     b.onclick = () => {
       const answer = b.dataset.answer;
-      box.querySelectorAll('[data-answer]').forEach(x => x.classList.toggle('is-picked', x === b));
+      if (CHECKS[kind].link) b.setAttribute('aria-expanded', 'true');
+      else box.querySelectorAll('[data-answer]').forEach(x => x.classList.toggle('is-picked', x === b));
       const fix = $('#cec-check-fix');
       fix.innerHTML = answer === 'yes' ? `<p>${CHECKS[kind].yes()}</p>`
         : `<ul>${CHECKS[kind].no().map(line => `<li>${line}</li>`).join('')}</ul>`;
@@ -1147,7 +1169,7 @@ function viewV3Finish() {
     <p class="cec-sub">The calculator installs AsmHook2 and restarts on its own.</p>
     ${walk('ce-jb-v3-asmhook')}
     <div class="cec-actions"><div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">Done</button></div></div>
-    <p class="cec-why"><strong>Good to know.</strong> Launch AsmHook2 once and it stays through restarts. After a RAM reset, launch it again. If Inequalz later shows CONFLICTING APPS, choose option 2, then leave Inequalz and launch AsmHook2 again.</p>
+    <p class="cec-why"><strong>Good to know.</strong> The jailbreak lasts until you reset your RAM. Come back to this page to turn it back on. If Inequalz later shows CONFLICTING APPS, choose option 2, then leave Inequalz and launch AsmHook2 again.</p>
   `, 2, 'v3_finish');
   $('#cec-next').onclick = viewPlay;
 }
@@ -1163,6 +1185,7 @@ async function gameLink() {
     await claim();
     await link.open();
     playLink = link;
+    syncPlayPicks();
   }
   return playLink;
 }
@@ -1190,7 +1213,7 @@ const handoff = tabHandoff({
 function lost(lead) {
   if (state.step === 0) say(`${lead} Then press Connect calculator.`);
   else if (state.step >= 3 || state.busy || state.screen === 'native') say(lead);
-  else lostBand(lead);
+  else { lostBand(lead); showBand(); }
 }
 async function claim() {
   if ((await handoff.claim()) === 'busy') throw refusal('TAB_BUSY', TAB_BUSY_TEXT);
@@ -1219,6 +1242,7 @@ async function sendGameTo(game) {
     if (linkDead(err)) {
       if (link === transport.link) transport.poisoned = true;
       playLink = null;
+      syncPlayPicks();
     }
     track('ce_send_fail', { game: game.name, reason: installerFailReason(err), ...refusedAt(err) });
     throw err;
@@ -1241,19 +1265,27 @@ function wireSends() {
 
 // The v3 route's last screen (v2.1 sends Snake with arTIfiCE). The button
 // comes first, how to start a game under it.
+// A CE has no USB serial number, so after the v3 restart the browser no
+// longer knows it (observed on hardware on 5.8.5): with no live link, Send
+// Snake opens the device list again, and the Play screen says so before it.
+// The line goes once Send Snake has the calculator (a second send will not
+// open the list) and comes back if that link dies.
+const playPicks = () => !(transport.link && !transport.poisoned) && !playLink;
+function syncPlayPicks() {
+  const line = $('#cec-play-picks');
+  if (line) line.hidden = !playPicks();
+}
 function viewPlay() {
   if (BACK) return viewBack('');
   paint(`
-    <h2>Put a game on it</h2>
+    <h2>Your calculator is jailbroken</h2>
     <p class="cec-sub">Press <kbd>clear</kbd> until the home screen shows, then send Snake.</p>
+    <p id="cec-play-picks"${playPicks() ? '' : ' hidden'}>It restarted, so the list opens again when you press Send Snake. Click your calculator, then Connect.</p>
     ${sendActions()}
     <div id="cec-howto"><p>Games start from the ${keyHelpHtml('cec')} menu.</p>${walk('ce-jb-v3-game')}</div>
-    ${gamesActions()}
+    ${gamesActions({ secondary: true })}
   `, 3, 'play');
   wireSends();
-  // A CE has no USB serial number, so after the v3 restart the browser no
-  // longer knows it (observed on hardware on 5.8.5).
-  if (transport.poisoned && !playLink) say('The calculator restarted, so your browser will ask you to pick it again when you press Send.');
 }
 
 // The last screen for a student a page sent here (BACK): the jailbreak is
@@ -1328,7 +1360,7 @@ function mountGuide() {
   const guide = $('#jbg');
   if (!guide) return;
   guide.querySelectorAll('ol.jbg-walk[data-walk]').forEach(ol => {
-    if (WALKS[ol.dataset.walk]) ol.outerHTML = keepKeyPunctuation(walk(ol.dataset.walk));
+    if (WALKS[ol.dataset.walk]) ol.outerHTML = keepKeyPunctuation(walk(ol.dataset.walk, { note: false }));
   });
   mountWalks(guide, { lazy: true });
   const manual = guide.querySelector('details#manual');
@@ -1434,13 +1466,14 @@ function installPreview() {
       .forEach(f => { state.picked[f.file] = { bytes: null, spec: f }; });
     renderPicked();
   };
-  window.__cecPreviewError = message => { fail(refusal('PREVIEW', message)); };
+  window.__cecPreviewError = message => { fail(refusal('PREVIEW', message)); showBand(); };
   // CALC_ERROR_<decimal> is a calculator refusal with that code; PICKER is a
   // device list that failed to open.
   window.__cecPreviewFail = code => {
     const n = /^CALC_ERROR_(\d+)$/.exec(code);
-    if (code === 'PICKER') return fail(markPicker(new CELinkError('USB_ERROR', 'The browser could not show the device list: previewed.')));
-    fail(n ? new CELinkError('CALC_ERROR', 'A previewed refusal.', { calcError: Number(n[1]) }) : refusal(code, code));
+    if (code === 'PICKER') fail(markPicker(new CELinkError('USB_ERROR', 'The browser could not show the device list: previewed.')));
+    else fail(n ? new CELinkError('CALC_ERROR', 'A previewed refusal.', { calcError: Number(n[1]) }) : refusal(code, code));
+    showBand();
   };
   window.__cecPreviewWindows = on => { forceWindows = !!on; };
   const q = new URLSearchParams(location.search);
