@@ -12,6 +12,9 @@
 // link asks for the calculator again instead of a reload, and the screens
 // around it say what the device list looks like. The logic it adds is
 // connect.mjs.
+//
+// The app panel (the app feature): the same screens drawn as one panel
+// the height of the window, one step at a time; the app block near the end.
 import { CETransport } from './transport.mjs';
 import { OS_540_URL, connectAfresh, connectFailScreen, noUsbKind, offersOs540, reconnect, runningText } from './connect.mjs';
 import { pickCalculator, sendGame } from './gamesend.mjs';
@@ -22,6 +25,7 @@ import {
   stepTracker, tabHandoff, track, trackConnectFail, unknownRefusal, unreadModel, TAB_BUSY_TEXT,
 } from './core.mjs';
 import { CELinkError } from '../celink.mjs';
+import { EVO_PRODUCT_ID as EVO_ID } from '../celink.mjs';
 
 const AUTHOR = 'https://yvantt.github.io/arTIfiCE/';
 const RELEASE = tag => `https://github.com/YvanTT/arTIfiCE/releases/tag/${tag}`;
@@ -32,6 +36,9 @@ const writtenAttrs = () => (/^https?:/.test(WRITTEN) ? ' target="_blank" rel="no
 const SHELL = document.getElementById('cec-shell')?.dataset || {};
 const LOCAL = PREVIEW_HOST ? new URLSearchParams(location.search) : null;
 const setting = (param, attr, fallback) => (LOCAL?.has(param) ? LOCAL.get(param) : SHELL[attr] || fallback);
+// The app panel: data-app "on" on #cec-shell (the generator writes it while
+// the app feature is on); ?app=on or ?app=off on localhost.
+const APP = setting('app', 'app', 'off') === 'on';
 // The Run screen's "arTIfiCE didn't open?" link and the running-program check before
 // a v2.1 send (data-runcheck 'on'). Both arms of the AsmHook2 split ask too.
 const RUN_CHECK = setting('runcheck', 'runcheck', 'off') === 'on';
@@ -65,9 +72,9 @@ const WALKS = {
       'Press <kbd>2nd</kbd>, then <kbd>+</kbd>.',
       'Press <kbd>7</kbd> for Reset.',
       'Press <kbd>1</kbd> for All RAM.',
-      'To confirm, press <kbd>2</kbd> for Reset (1 is No).',
+      'To confirm, press <kbd>2</kbd> for Reset.',
     ],
-    done: 'The RAM is clear.',
+    done: 'It says RAM Cleared.',
   },
   'ce-jb-v3-open-inequalz': {
     alt: 'Opening Inequalz on a calculator: the APPS list, the splash screen, then the Functions (Y=) screen',
@@ -85,6 +92,18 @@ const WALKS = {
       'Press <kbd>enter</kbd>.',
     ],
     done: 'It reports Installation successful. Press <kbd>clear</kbd> until the home screen shows, or the calculator won\'t take the game.',
+  },
+  // Turning the jailbreak back on after a RAM reset (the popup's found-but-off
+  // screen): opening AsmHook2 again sets its hook (CEmu 5.8.5: Installation
+  // successful!, games start from prgm). The same three screens as above.
+  'ce-jb-v3-turnon': {
+    frames: 'ce-jb-v3-asmhook',
+    alt: 'Opening AsmHook2 on a calculator: the APPS list, AsmHook2 picked, then Installation successful',
+    steps: [
+      'Press <kbd>apps</kbd>.',
+      'Arrow down to AsmHook2 and press <kbd>enter</kbd>.',
+    ],
+    done: 'It says Installation successful. Press <kbd>clear</kbd>. Games start from <kbd>prgm</kbd> again.',
   },
   'ce-jb-v3-game': GAME_WALK,
   'ce-jb-native-game': GAME_WALK,
@@ -114,7 +133,8 @@ const WALKS = {
 };
 
 const walkEntries = w => w.steps.concat([w.done]);
-const frameUrl = (name, i) => `/images/evo/${name}-${i}.png`;
+// A walk may show another walk's pictures (`frames`).
+const frameUrl = (name, i) => `/images/evo/${WALKS[name]?.frames || name}-${i}.png`;
 const CHEVRON_LEFT = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M9 2 4 7l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const CHEVRON_RIGHT = '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M5 2l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
@@ -232,55 +252,58 @@ async function tracked(game, send) {
   track('ce_send_success', { game, retried: 0 });
 }
 
-// Fixed choices, never a text box (a box collects personal details that must
-// not reach analytics). Each shows its fix and sends one ce_report per page
-// load, with the choice as `reason` and the step as `game`.
-const HELP_EMAIL = 'contact@calcplex.com';
-const REPORT_CHOICES = [
-  ['not_found', "Connect doesn't find my calculator"],
-  ['froze', 'The calculator froze or reset'],
-  ['wont_start', "A game won't start"],
-  ['other', 'Something else'],
-];
+// "Didn't work?" fits the step it opens on. A step with one likely problem
+// shows its fix at once; only Connect, where two different things go wrong,
+// asks first (fixed choices, never a text box: a box collects personal
+// details that must not reach analytics). Either way the panel ends with Help
+// chat. One ce_report per value per page load: the choice picked, or, for a
+// step with no choices, the open itself with the step's value; `game` is the step.
+const REPORT_CHOICES = {
+  not_found: "My calculator isn't in the list",
+  in_use: "It's in the list but won't connect",
+};
+// The choices for the step on show, or [] when the step has one fix.
+function reportChoices() {
+  return state.step === 0 ? ['not_found', 'in_use'] : [];
+}
+// The value a step with no choices counts its open as.
+function reportTopic() {
+  const screen = state.screen || '';
+  if (state.step >= 3 || state.jailbroken || screen === 'native' || screen === 'v21_found') return 'wont_start';
+  if (screen === 'v3_reset' || screen === 'v3_inequalz') return 'froze';
+  return 'other';
+}
 function reportFix(choice) {
   const i = state.info;
-  const li = items => `<ul>${items.filter(Boolean).map(x => `<li>${x}</li>`).join('')}</ul>`;
-  // Manual installation avoids this page's USB entirely. It fixes nothing once
-  // the jailbreak is in, so "a game won't start" does not offer it.
+  const p = items => items.filter(Boolean).map(x => `<p>${x}</p>`).join('');
   const manual = lead => `${lead} <a href="${WRITTEN}"${writtenAttrs()}>manual installation</a>.`;
+  const replug = 'Unplug the calculator, plug it back in, then press Start over.';
   // On Windows the missing driver is by far the likeliest cause.
-  if (choice === 'not_found') return li([
-    onWindows() && `On Windows, <button type="button" class="cec-inline" data-go="install">install TI Connect CE</button>, and close it before you press Connect.`,
-    'In the device list, click your calculator, then Connect.',
-    'Use the USB cable that came with the calculator. Some cables only charge and carry no data.',
-    'Turn the calculator on, unplug the cable, then plug it back in.',
-    'Use Chrome or Edge on a computer.',
-    manual('Still stuck? Try the'),
+  if (choice === 'not_found') return p([
+    onWindows() ? '<button type="button" class="cec-inline" data-go="install">Install TI Connect CE</button>. Windows only lists the calculator once it is installed.'
+      : 'Turn the calculator on, then unplug the cable and plug it back in.',
+    'Use the cable that came with the calculator. Some cables only charge.',
   ]);
-  if (choice === 'froze') return li([
-    'Unplug the cable, give the calculator a few seconds, then press Start over below.',
-    'Still frozen? Press the reset button on the back of the calculator. It clears RAM: archived programs are safe, the rest are erased.',
-    // Only v3 restarts the calculator; before a connect the route is not known.
-    (!i || i.route === 'v3') && 'With arTIfiCE v3 the calculator restarts by itself when the jailbreak installs. That part is normal.',
-    manual('If it keeps happening, try the'),
+  if (choice === 'in_use') return p([
+    'Close TI Connect CE and any other tab using the calculator.',
+    'Then unplug it, plug it back in and try again.',
   ]);
-  // A calculator that needs no jailbreak has nothing to install by hand, so
-  // its answer is how to start a game, not the manual installation alone.
-  if (choice === 'other' && i?.route === 'native') return li([
-    esc(startHint(i.os, 'the game')),
-    manual('The steps for your OS, with pictures, are in the'),
+  if (choice === 'froze') return p([
+    state.screen === 'v3_inequalz' ? 'The calculator restarts on its own when the install finishes.' : 'Clearing the RAM restarts the calculator.',
+    'If it froze instead, unplug the cable, press the reset button on the back of the calculator, then press Start over.',
   ]);
-  if (choice === 'wont_start') return li([
+  if (choice === 'wont_start') return p([
     i ? esc(startHint(i.os, 'the game')) : 'Start games the way the Play step shows for your calculator.',
-    i && i.route === 'v3' && 'After a RAM reset, launch AsmHook2 again from <kbd>apps</kbd>.',
     // Same tab: this page lets go of the calculator on leaving, so the games page can open it.
-    `If the calculator mentions LibLoad or libraries, send the game again from <a href="${GAMES}">our games page</a>.`,
+    `If it mentions LibLoad or libraries, send the game again from <a href="${GAMES}">our games page</a>.`,
   ]);
-  return li([manual('Try the')]);
+  // Turn on the jailbreak: AsmHook2 missing means the last file never took.
+  if (state.screen === 'v3_finish') return p(['If AsmHook2 isn\'t in apps, the install didn\'t finish. Press Start over and do the steps again.']);
+  return p([replug, manual('Still stuck? Try the')]);
 }
-// The address comes last, after the fix, and as plain text: a mailto link
-// does nothing on a machine with no mail client.
-const reportMail = () => `<p class="cec-report-mail">Nothing working? Email ${HELP_EMAIL}.</p>`;
+// Help chat at the end of the panel: the footer's own link (Plexy's), so it
+// shows exactly when that one does: not there, or hidden, means no button.
+const helpLink = () => [...document.querySelectorAll('#cec .cec-foot .hp-link')].find(l => l.getClientRects().length) || null;
 function toggleReport() {
   const box = $('#cec-report'), btn = $('#cec-report-open');
   if (!box || !btn) return;
@@ -288,19 +311,28 @@ function toggleReport() {
   box.hidden = !open;
   btn.setAttribute('aria-expanded', String(open));
   if (!open) return;
-  box.innerHTML = `<div class="cec-report-head"><p class="cec-report-q">What happened?</p>
+  const choices = reportChoices();
+  box.innerHTML = `<div class="cec-report-head"><p class="cec-report-q">${choices.length ? 'What happened?' : 'Didn\'t work?'}</p>
     <button type="button" class="cec-inline cec-report-close">Close</button></div>
-    <div class="cec-report-choices">${REPORT_CHOICES.map(([id, label]) =>
-      `<button type="button" data-choice="${id}">${label}</button>`).join('')}</div>
-    <div class="cec-report-fix" id="cec-report-fix" hidden></div>`;
+    ${choices.length ? `<div class="cec-report-choices">${choices.map(id =>
+      `<button type="button" data-choice="${id}">${REPORT_CHOICES[id]}</button>`).join('')}</div>` : ''}
+    <div class="cec-report-fix" id="cec-report-fix" hidden></div>
+    <p class="cec-report-chat" hidden><button type="button" class="cec-inline" id="cec-report-chat">Help chat</button></p>`;
   box.querySelectorAll('[data-choice]').forEach(b => { b.onclick = () => report(b.dataset.choice); });
   box.querySelector('.cec-report-close').onclick = () => { toggleReport(); btn.focus(); };
+  // Shown once Plexy's link is in the footer (it adds it after the page loads).
+  const chat = $('#cec-report-chat');
+  chat.onclick = () => helpLink()?.click();
+  const showChat = () => { chat.parentElement.hidden = !helpLink(); };
+  showChat();
+  if (chat.parentElement.hidden) setTimeout(showChat, 1500);
+  if (!choices.length) report(reportTopic());
 }
 function report(choice) {
   const box = $('#cec-report');
   box.querySelectorAll('[data-choice]').forEach(b => b.classList.toggle('is-picked', b.dataset.choice === choice));
   const fix = $('#cec-report-fix');
-  fix.innerHTML = reportFix(choice) + reportMail();
+  fix.innerHTML = reportFix(choice);
   fix.hidden = false;
   // An answer that names Start over shows it (on Connect it waits for a failure).
   const restart = $('#cec-restart');
@@ -424,6 +456,7 @@ function paint(body, step, screen, { deadEnd = false } = {}) {
   state.step = step;
   state.screen = screen;
   state.deadEnd = deadEnd;
+  if (APP) return appFrame(body);
   root().innerHTML = `<section class="cec-card">${progress()}${keepKeyPunctuation(body)}
     <p class="cec-status" role="status" aria-live="polite" id="cec-status"></p>
     <div class="cec-error" role="alert" id="cec-error" hidden></div>
@@ -457,18 +490,11 @@ function paint(body, step, screen, { deadEnd = false } = {}) {
 // these bands are for the same failure again on that screen, and for a device
 // list opened by any other button.
 const WINDOWS_OUTCOME_HTML = {
-  no_device_again: `<p><strong>No calculator was picked.</strong> In the list, click your calculator, then Connect.
-    If the list is empty, check that the calculator is on and try another USB cable. Some cables only charge.</p>`,
-  no_device: `<p><strong>Calculator not in the list?</strong> On Windows it only shows up once
-    TI Connect CE is installed. If it is installed, update it to the latest version from TI,
-    check that the calculator is on and plugged in, then press Connect calculator again.</p>
+  no_device_again: `<p><strong>No calculator was picked.</strong> If the list was empty, turn the calculator on or try another USB cable.</p>`,
+  no_device: `<p><strong>Install TI Connect CE, then try again.</strong> On Windows the calculator only shows up in the list once it's installed.</p>
     <p><button type="button" class="cec-inline" data-go="install">Install TI Connect CE</button></p>`,
-  open_failed: `<p><strong>TI Connect CE is probably still open.</strong> Windows lets only one
-    program use the calculator at a time. Close TI Connect CE and any other tab using the
-    calculator, unplug the calculator, plug it back in, then press Connect calculator again.</p>`,
-  open_security: `<p><strong>Windows won't let this page use the calculator yet.</strong> Update
-    TI Connect CE to the <a href="${TICONNECT_URL}" target="_blank" rel="noopener nofollow">latest version from TI</a>,
-    then unplug the calculator, plug it back in and press Connect calculator again.</p>`,
+  open_failed: `<p><strong>Close TI Connect CE and any other tab using the calculator.</strong> Then unplug it, plug it back in and press Connect calculator again.</p>`,
+  open_security: `<p><strong>Update TI Connect CE to the <a href="${TICONNECT_URL}" target="_blank" rel="noopener nofollow">latest version from TI</a>.</strong> Then unplug the calculator, plug it back in and press Connect calculator again.</p>`,
 };
 // The Windows box for an error: open_security has its own, and so does an
 // empty list on the screen that already says to install TI Connect CE.
@@ -516,6 +542,18 @@ function fail(err) {
       || (unknownRefusal(err) ? retryText(err.calcError) : null) || refusalText(err) || err?.message || String(err);
   }
   el.hidden = false;
+  if (APP) {
+    appShowManual(el);
+    // Nothing picked, on Connect: the line under the button already says
+    // what to do in the list, so the error says only what happened.
+    if (reason === 'no_device' && state.screen === 'connect' && !onWindows() && !onChromeOS()) el.textContent = 'No calculator was picked.';
+    const go = $('#cec-go');
+    if (go && /^(connect|win_)/.test(state.screen)) {
+      go.textContent = 'Try again';
+      // The card's words name its button; here the button says Try again.
+      el.innerHTML = el.innerHTML.replace(/press Connect calculator again/g, 'press Try again');
+    }
+  }
   showManual(state.deadEnd || !(programRunning(err) || (NO_MANUAL.includes(reason) && !unreadModel(err))));
   say('');
 }
@@ -528,7 +566,8 @@ function showBand() {
   const el = $('#cec-error');
   if (!el || el.hidden) return;
   const restart = $('#cec-restart');
-  if (restart) restart.hidden = false;
+  // The popup's Start over shows on its first step only when the band names it.
+  if (restart && !(APP && state.step === 0 && !/Start over/.test(el.textContent))) restart.hidden = false;
   const r = el.getBoundingClientRect();
   const bottom = window.innerHeight || document.documentElement.clientHeight;
   if (r.top < barBottom() || r.bottom > bottom) el.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
@@ -582,6 +621,7 @@ async function work(fn) {
   const el = $('#cec-error'); if (el) el.hidden = true;
   showManual(state.deadEnd);
   root().querySelectorAll('button, input').forEach(b => { b.disabled = true; });
+  root().classList.add('is-busy');
   try {
     await fn();
   } catch (err) {
@@ -589,6 +629,7 @@ async function work(fn) {
     showBand();
   } finally {
     state.busy = false;
+    root().classList.remove('is-busy');
     // Re-enable everything, then let the screen and its walks lock what should stay off.
     root().querySelectorAll('button, input').forEach(b => { b.disabled = false; });
     root().querySelectorAll('.cec-walk').forEach(w => w._sync?.());
@@ -659,6 +700,7 @@ const WIN_FIX = {
   },
 };
 function viewWinFix(kind) {
+  if (APP) return appWinFix(kind);
   const fix = WIN_FIX[kind];
   paint(`
     <h2>${fix.heading}</h2>
@@ -674,6 +716,7 @@ function viewWinFix(kind) {
 const viewInstallTIConnect = () => viewWinFix('install');
 
 function viewConnect() {
+  if (APP) return appConnect();
   const usb = !!navigator.usb;
   const win = onWindows();
   paint(`
@@ -724,6 +767,7 @@ function wireConnect() {
 }
 
 function viewRoute() {
+  if (APP) return appRoute();
   const route = state.info.route;
   const next = {
     v21: ['Install arTIfiCE v2.1', viewFilesV21],
@@ -732,7 +776,7 @@ function viewRoute() {
   paint(`
     <h2>${ROUTES[route].heading}</h2>
     ${factsBlock({ reason: !next })}
-    ${next ? '' : `<p>Nothing will be sent. ${route === 'unknown'
+    ${next ? '' : `<p>${route === 'unknown'
       ? 'Check the About screen on the calculator and connect again.'
       : `<a href="${AUTHOR}" target="_blank" rel="noopener nofollow">The author's page</a> lists every version arTIfiCE covers.`}</p>`}
     ${next ? `<div class="cec-actions"><div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">${next[0]}</button></div></div>` : ''}
@@ -741,6 +785,7 @@ function viewRoute() {
 }
 
 function viewNative() {
+  if (APP) return appNative();
   const early = needsAsm(state.info.os);
   const lead = early ? `Games start with Asm(, then the ${keyHelpHtml('cec')} menu.` : `Games start from the ${keyHelpHtml('cec')} menu.`;
   paint(`
@@ -791,6 +836,7 @@ function checkInequalz() {
 }
 
 function viewNoInequalz() {
+  if (APP) return appNoInequalz();
   paint(`
     <h2>First, install Inequality Graphing on your calculator</h2>
     <ol class="cec-do">
@@ -847,13 +893,13 @@ async function confirmInequalz(stillMissing) {
 }
 
 function viewInequalzUnsure() {
+  if (APP) return appInequalzUnsure();
   paint(`
     <h2>Check for Inequalz on the calculator</h2>
     <p class="cec-sub">The app list came back empty, so check by hand.</p>
     <ol class="cec-do">
       <li><strong>Press <kbd>apps</kbd>.</strong> Look for Inequalz in the list.</li>
-      <li><strong>If it is not there, <a href="${INEQUALZ_URL}" target="_blank" rel="noopener nofollow">get it from TI</a>
-        and send it with TI Connect CE before you carry on.</strong></li>
+      <li><strong>If it is not there, <button type="button" class="cec-inline" id="cec-ineq-send">send it from this page</button>.</strong></li>
     </ol>
     <div class="cec-actions">
       <div class="wp-block-button"><button type="button" class="wp-block-button__link no-border-radius" id="cec-next">Inequalz is on the calculator</button></div>
@@ -862,9 +908,11 @@ function viewInequalzUnsure() {
   `, 2, 'inequalz_unsure');
   $('#cec-next').onclick = viewV3Reset;
   $('#cec-recheck').onclick = () => work(() => confirmInequalz('The calculator still did not list its apps. Carry on from the apps menu if you can see Inequalz there.'));
+  $('#cec-ineq-send').onclick = () => { if (!state.busy) viewNoInequalz(); };
 }
 
 function viewV3Reset() {
+  if (APP) return appV3Reset();
   paint(`
     <h2>Clear the calculator's RAM</h2>
     <div class="warn"><p>This erases every program and variable that is not archived.
@@ -957,6 +1005,7 @@ function renderPicked() {
 // Snake goes with arTIfiCE, so the shell has a game to list the first time it
 // runs, and nothing is running on the calculator while either one is sent.
 function viewFilesV21() {
+  if (APP) return appFilesV21();
   state.v21 = resumable([sendArtificeV21, () => sendGameTo(GAME)]);
   filesScreen({
     files: OFFICIAL.v21.files,
@@ -1031,6 +1080,7 @@ function offerSkip() {
   $('#cec-only')?.remove();
   const heading = root().querySelector('.cec-card h2');
   heading.textContent = `Send ${GAME.label}`;
+  if (APP) root().querySelector('.cec-app-body .cec-sub')?.remove();
   heading.insertAdjacentHTML('afterend', '<p class="cec-sub">arTIfiCE is on the calculator as program A.</p>');
   next.textContent = `Send ${GAME.label}`;
   next.closest('.cec-actions').insertAdjacentHTML('beforeend', `<button type="button" id="cec-skip" class="cec-plain">Go on without ${GAME.label}</button>`);
@@ -1042,13 +1092,14 @@ function offerSkip() {
 // Send only arTIfiCE; its ce_step name keeps the two apart.
 const runScreen = ({ snake, only }) => (snake ? 'v21_run' : only ? 'v21_run_only' : 'v21_run_nosnake');
 function viewV21Run({ snake, only = false }) {
+  if (APP) return appV21Run({ snake, only });
   if (BACK) return viewBack('arTIfiCE is on the calculator as program A.');
   paint(`
     <h2>Run arTIfiCE</h2>
     <p class="cec-sub">${snake ? `arTIfiCE and ${GAME.label} are on the calculator.` : 'arTIfiCE is on the calculator as program A.'}</p>
-    ${snake ? '' : `<p>Put a game on the calculator before you run A. Send ${GAME.label} here, or pick one from the games page.</p>${sendActions()}`}
+    ${snake ? '' : `<p>Put a game on the calculator before you run A. Send ${GAME.label} here.</p>${sendActions()}`}
     ${walk('ce-jb-v21-run')}
-    <p>Whenever you want to play: ${keyHelpHtml('cec')}, run A, pick the game. Press <kbd>${LEAVE_SHELL_KEY}</kbd> to leave arTIfiCE.</p>
+    <p>Whenever you want to play: ${keyHelpHtml('cec')}, run A, pick the game.</p>
     ${RUN_CHECK ? checkBlock('plain') : ''}
     ${gamesActions({ secondary: !snake })}
   `, 3, runScreen({ snake, only }));
@@ -1102,14 +1153,14 @@ function wireCheck(kind) {
   });
 }
 function viewV3Installer() {
+  if (APP) return appV3Installer();
   filesScreen({
     files: [OFFICIAL.v3.files[0]],
     tag: OFFICIAL.v3.tag,
     step: 2,
     screen: 'v3_installer',
     heading: 'Send the installer program',
-    action: 'Send arTIfiCE.8xp',
-    after: '<p class="cec-why">File 1 of 2. The trigger comes next, once Inequalz is open.</p>',
+    action: 'Send the installer',
     onSend: sendV3Installer,
   });
 }
@@ -1130,21 +1181,22 @@ function sendV3Installer() {
 
 // Send stays off until the student ticks that Inequalz is open on Y=.
 function viewV3Inequalz() {
+  if (APP) return appV3Inequalz();
   const trigger = OFFICIAL.v3.files[1];
   filesScreen({
     files: [trigger],
     tag: OFFICIAL.v3.tag,
     step: 2,
     screen: 'v3_inequalz',
-    heading: 'Open Inequalz, then send the trigger',
+    heading: 'Open Inequalz, then finish the install',
     lead: 'The installer program is on the calculator.',
-    action: 'Send the trigger',
+    action: 'Finish the install',
     onSend: sendV3Trigger,
     before: `
       ${walk('ce-jb-v3-open-inequalz')}
-      <div class="warn"><p>Send the trigger only while Inequalz is open on its Y= screen, the last picture above.</p></div>
+      <div class="warn"><p>Finish the install only while Inequalz is open on its Y= screen, the last picture above.</p></div>
       <label class="cec-confirm"><input type="checkbox" id="cec-open"> Inequalz is open on its Y= screen</label>`,
-    after: '<p class="cec-why">The calculator restarts on its own when the trigger arrives. That\'s the install finishing.</p>',
+    after: '<p class="cec-why">The calculator restarts on its own when the install finishes.</p>',
     gate: () => !!$('#cec-open')?.checked,
   });
   $('#cec-open').onchange = renderPicked;
@@ -1153,7 +1205,7 @@ function viewV3Inequalz() {
 function sendV3Trigger() {
   work(async () => {
     const trigger = state.picked[OFFICIAL.v3.files[1].file];
-    say('Sending the trigger. The calculator restarts as it lands.');
+    say('Finishing the install. The calculator restarts on its own.');
     // No listing with an app in front; precheck already cleared the name.
     await tracked('ARTIFICE_V3_INEQUVAR', () => transport.sendVerified(trigger.bytes, { official: trigger.spec, skipDirectory: true }));
     say('');
@@ -1164,6 +1216,7 @@ function sendV3Trigger() {
 // The jailbreak is not finished until AsmHook2 has run, so how to start games
 // waits for the Play screen.
 function viewV3Finish() {
+  if (APP) return appV3Finish();
   paint(`
     <h2>Launch AsmHook2</h2>
     <p class="cec-sub">The calculator installs AsmHook2 and restarts on its own.</p>
@@ -1211,7 +1264,7 @@ const handoff = tabHandoff({
 // on the steps after it, the band's connect again does; once the install is
 // in, the Send buttons pick the calculator themselves.
 function lost(lead) {
-  if (state.step === 0) say(`${lead} Then press Connect calculator.`);
+  if (state.step === 0) say(`${lead} Then press ${APP ? 'Connect' : 'Connect calculator'}.`);
   else if (state.step >= 3 || state.busy || state.screen === 'native') say(lead);
   else { lostBand(lead); showBand(); }
 }
@@ -1254,6 +1307,7 @@ function sendGameButton(game) {
   work(async () => {
     const r = await sendGameTo(game);
     say(`${game.label} is on the calculator. ${startHint(String(state.info?.os || r.os), game.name)}`);
+    if (APP) appSent();
     $('#cec-howto')?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' });
   });
 }
@@ -1277,6 +1331,7 @@ function syncPlayPicks() {
 }
 function viewPlay() {
   if (BACK) return viewBack('');
+  if (APP) return appPlay();
   paint(`
     <h2>Your calculator is jailbroken</h2>
     <p class="cec-sub">Press <kbd>clear</kbd> until the home screen shows, then send Snake.</p>
@@ -1291,6 +1346,7 @@ function viewPlay() {
 // The last screen for a student a page sent here (BACK): the jailbreak is
 // in, so the way on is back to that page, in this tab.
 function viewBack(lead) {
+  if (APP) return appBack(lead);
   paint(`
     <h2>Your calculator is jailbroken</h2>
     ${lead ? `<p class="cec-sub">${lead}</p>` : ''}
@@ -1310,6 +1366,7 @@ const NO_USB = {
   computer: ['The installer needs Chrome or Edge', 'Open this page in Chrome or Edge.'],
 };
 function unavailable(kind = onChromeOS() ? 'chromeos' : noUsbKind(navigator)) {
+  if (APP) return appUnavailable(kind);
   trackStep('no_webusb');
   state.screen = 'no_webusb';
   const [title, text] = NO_USB[kind];
@@ -1333,6 +1390,854 @@ function unavailable(kind = onChromeOS() ? 'chromeos' : noUsbKind(navigator)) {
   };
 }
 
+// --- The app (the app feature) ----------------------------------------------
+// The installer as a popup: on this page a small card opens it; on a page
+// that loads this module beside its own sender (a game page, PlexMath: the
+// generator writes a hidden #cec-shell with data-host), a click on any link
+// to this page opens it in place instead. Inside: one golden path, one title,
+// one sentence, one main button. Every screen still paints through paint()
+// with its ce_step name and keeps the ids the logic above reads (#cec-go,
+// #cec-next, #cec-keys, #cec-keys-row, #cec-open, #cec-auto-go, ...). Each view
+// above hands over to its app twin first thing while APP is set. With the
+// keys on, the page does the calculator's steps; the steps by hand show only
+// where an automated step stopped.
+const ICON = {
+  check: '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 7.4 5.8 10 11 4.4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  done: '<svg width="56" height="56" viewBox="0 0 56 56" aria-hidden="true"><circle cx="28" cy="28" r="28" fill="#e6f4ec"/><circle cx="28" cy="28" r="19" fill="#1e8a4f"/><path d="M19.5 28.5 25.5 34 36.5 22.5" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  warn: '<svg width="18" height="18" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6 15 14H1z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6v3.5M8 11.7v.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  hand: '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12V5.5a1.5 1.5 0 0 1 3 0V11m0-6.5V4a1.5 1.5 0 0 1 3 0v7m0-5.5a1.5 1.5 0 0 1 3 0V12m0-4.5a1.5 1.5 0 0 1 3 0V15a7 7 0 0 1-7 7h-1a7 7 0 0 1-5.6-2.8L3.2 15a1.6 1.6 0 0 1 2.5-2L8 15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  file: '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2.5h8l4.5 4.5v14.5H6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 2.5V7h4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
+  game: '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h5v-4h6v8h5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="20" cy="16" r="1.6" fill="currentColor"/></svg>',
+  close: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 3.5l9 9m0-9-9 9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
+};
+
+// The page this module was loaded into to jailbreak on the spot: its name
+// (data-host on #cec-shell, written by the generator), or '' on this page.
+const HOST = setting('host', 'host', '');
+// On a host page, the game the student was sending when CE Send asked for a
+// jailbreak (its ce-jailbreak-for event): the last screen offers it in place
+// of Snake. ?forgame=<label> on localhost.
+let forGame = PREVIEW_HOST ? new URLSearchParams(location.search).get('forgame') : null;
+// The game was sent already (a "Game didn't start?" button asked): send it again.
+let forAgain = PREVIEW_HOST && new URLSearchParams(location.search).has('again');
+
+// The main button, a quiet second action, a link styled as either, and the
+// small disclosure for anything that explains.
+const appBtn = (id, label, { disabled = false, big = false, alt = false } = {}) =>
+  `<button type="button" class="cec-btn${big ? ' cec-btn-big' : ''}${alt ? ' cec-btn-alt' : ''}" id="${id}"${disabled ? ' disabled' : ''}>${label}</button>`;
+const appLink = (href, label, { quiet = false, blank = false, big = false, alt = false } = {}) =>
+  `<a class="${quiet ? 'cec-quiet' : `cec-btn${big ? ' cec-btn-big' : ''}${alt ? ' cec-btn-alt' : ''}`}" href="${href}"${blank ? ' target="_blank" rel="noopener nofollow"' : ''}>${label}</a>`;
+const appQuiet = (id, label) => `<button type="button" class="cec-quiet" id="${id}">${label}</button>`;
+const appMore = (summary, html) => `<details class="cec-more"><summary>${summary}</summary><div class="cec-more-body">${html}</div></details>`;
+const appWarn = html => `<p class="cec-app-warn">${ICON.warn}<span>${html}</span></p>`;
+// The tab's own title while "Your turn" stands in for it (appAutoRefresh).
+let tabTitle = null;
+
+// The way on once the jailbreak is in: more games, or back to the page that
+// opened the popup (or the one that sent the student here, ?next=). `alt`:
+// outlined, where the screen's main button is another (Run it for me, Send Snake).
+const appOnward = ({ big = true, alt = false } = {}) => (HOST ? appBtn('cec-app-back', HOST === 'the games' ? 'See all games' : `Back to ${esc(HOST)}`, { big, alt })
+  : BACK ? appLink(esc(BACK.href), `Go back to ${esc(BACK.name)}`, { big, alt })
+  : appLink(GAMES, 'See all games', { big, alt }));
+// The last line for both AsmHook2 routes. The way back on is the games
+// pages' Turn it back on, which opens this popup at that step.
+const APP_LASTS = '<p class="cec-app-hint">The jailbreak lasts until you reset your RAM. Come back to this page to turn it back on.</p>';
+function wireOnward() {
+  const back = $('#cec-app-back');
+  if (back) back.onclick = () => appClose({ release: true });
+}
+
+// A screen's body. `top` is a picture over the title (the connection
+// illustration, a done mark); `manual` is the by-hand half of a screen whose
+// main button presses the keys, shown only once a press has failed (or
+// always, with the keys off); `tail` comes after it.
+function appScreen({ top = '', title, lead = '', actions = '', after = '', manual = '', tail = '', more = '', cls = '' }) {
+  const keys = actions.includes('id="cec-keys-row"');
+  return `<div class="cec-app-body${cls ? ` ${cls}` : ''}${keys && manual ? ' has-keys' : ''}">
+    ${top}
+    <h2>${title}</h2>
+    ${lead ? `<p class="cec-sub">${lead}</p>` : ''}
+    ${actions}
+    ${after}
+    ${manual ? `<div class="cec-app-manual">${manual}</div>` : ''}
+    ${tail}
+    ${more}
+  </div>`;
+}
+
+// The "for me" button and its own lines (forMeClick writes into them). With
+// no label, the lines only: a by-hand screen under the chain keeps them, so a
+// stopped step can say why.
+const appKeys = ({ label = '', hint = '', hidden = false }) => `
+    <div class="cec-keys cec-app-keys" id="cec-keys-row"${hidden ? ' hidden' : ''}>
+      ${label ? `<div class="cec-actions">${appBtn('cec-keys', label)}</div>` : ''}
+      ${hint ? `<p class="cec-keys-lead">${hint}</p>` : ''}
+      <p class="cec-status" role="status" aria-live="polite" id="cec-keys-note"></p>
+      <div class="cec-error" role="alert" id="cec-keys-error" hidden></div>
+    </div>`;
+
+// A walk as the card has it: every step in a numbered list, the calculator
+// screen beside it (in a dark bezel) following the step picked. A step or the
+// picture moves it; the card's Back and Next stay in the markup for
+// mountWalks, out of sight.
+const appWalk = name => walk(name, { note: false }).replace('class="cec-walk"', 'class="cec-walk cec-app-walk"');
+
+
+// The footer: Start over (not on the first step, where it would only show
+// that step again, unless a failure there names it), the credits and Plexy's
+// Help chat. One line on a laptop. "Didn't work?" sits in the screen itself
+// (appFrame), under a failure and on the install and play steps.
+const appFoot = () => `<div class="cec-foot">
+    <button type="button" id="cec-restart"${state.busy ? ' disabled' : ''}${state.step === 0 ? ' hidden' : ''}>Start over</button>
+    ${appCredits()}
+  </div>`;
+// The credits wherever the popup opens, at its bottom: the tutorial
+// page's own list (data-credits on #cec-shell,
+// written by the generator), each author's name and source link in view,
+// the whole list one click away.
+const CREDITS = (() => {
+  try {
+    return JSON.parse(document.getElementById('cec-shell')?.dataset.credits || '[]');
+  } catch {
+    return [];
+  }
+})();
+// This installer's own source (GPL), the last line of the list.
+const CELINK = 'https://github.com/calcplex/celink';
+const creditLink = ([label, href]) => `<a href="${esc(href)}" target="_blank" rel="noopener nofollow">${esc(label)}</a>`;
+const appCredits = () => (CREDITS.length ? `<details class="cec-app-credits">
+      <summary>Credits: ${CREDITS.filter(c => c.by).map(c => {
+    const src = (c.links || []).find(([l]) => l === 'Source') || (c.links || [])[0];
+    return `${src ? creditLink([c.name, src[1]]) : esc(c.name)} by ${esc(c.by)}`;
+  }).join(', ')}</summary>
+      <ul>${CREDITS.map(c => `<li><strong>${esc(c.name)}</strong>${esc(c.text ?? `, ${c.note ? `${c.note}, ` : ''}by ${c.by}${c.license ? `, ${c.license}` : ''}.`)}${(c.links || []).length ? ` ${c.links.map(creditLink).join(' &middot; ')}` : ''}</li>`).join('')}
+        <li><strong>This installer</strong>, by CalcPlex. GPL. ${creditLink(['Source', CELINK])}</li></ul>
+    </details>` : '');
+
+// Four segments and their words. The segment on show fills halfway, or, while
+// the v3 chain runs, as far as the chain has got. A last screen (jailbroken,
+// a game ready, no jailbreak needed, already jailbroken) shows the bar full.
+const appDone = () => /^(play|native|v21_found|back|v21_run)/.test(state.screen || '');
+function appProgress() {
+  const native = state.info?.route === 'native';
+  const done = appDone();
+  const at = done ? STEPS.length - 1 : state.step;
+  let fill = done ? 1 : 0.5;
+  const segs = STEPS.map((label, i) => {
+    const cls = native && i === 2 ? 'is-skipped' : done || i < at ? 'is-done' : i === at ? 'is-now' : '';
+    return `<li class="${cls}"${i === at ? ` aria-current="step" style="--fill:${fill}"` : ''}><span>${label}</span></li>`;
+  }).join('');
+  return `<nav class="cec-progress cec-app-progress" aria-label="Progress"><ol>${segs}</ol>
+    <p class="cec-app-steplabel">Step ${at + 1} of ${STEPS.length} <span aria-hidden="true">·</span> ${STEPS[at]}</p></nav>`;
+}
+
+// paint()'s frame. The status and error lines go where the screen marks them
+// (data-status-spot), else under the row of actions marked data-status, else
+// under the last row, else at the end. A screen's help link (Didn't work?,
+// arTIfiCE didn't open?) has one fixed spot at the bottom of the content,
+// its room kept when it is empty, so nothing moves when it shows.
+function appFrame(body) {
+  root().innerHTML = `<section class="cec-card cec-app" data-screen="${esc(state.screen)}">${appProgress()}
+    <div class="cec-app-main">${keepKeyPunctuation(body)}<div class="cec-app-second"></div></div>
+    <div class="cec-report" id="cec-report" hidden></div>
+    ${appFoot()}</section>`;
+  const card = root().querySelector('.cec-app');
+  const main = card.querySelector('.cec-app-main');
+  const status = document.createElement('p');
+  Object.assign(status, { className: 'cec-status', id: 'cec-status' });
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  const error = document.createElement('div');
+  Object.assign(error, { className: 'cec-error', id: 'cec-error', hidden: true });
+  error.setAttribute('role', 'alert');
+  const spot = main.querySelector('[data-status-spot]');
+  const rows = [...main.querySelectorAll('.cec-actions')].filter(r => !r.closest('.cec-keys'));
+  const anchor = spot || main.querySelector('.cec-actions[data-status]') || rows[rows.length - 1];
+  // "Didn't work?" right under the failure band; on the install and play
+  // steps it shows without one too.
+  const didnt = document.createElement('p');
+  didnt.className = `cec-app-didnt${state.step >= 2 ? ' is-always' : ''}`;
+  didnt.innerHTML = `<button type="button" id="cec-report-open"${state.busy ? ' disabled' : ''} aria-expanded="false" aria-controls="cec-report">Didn't work?</button>`;
+  if (anchor) anchor.after(status, error);
+  else (main.querySelector('.cec-app-body') || main).append(status, error);
+  const second = main.querySelector('.cec-app-second');
+  // The v2.1 Run screen's own link takes the spot; its fixes still open in
+  // place, where the screen put them.
+  const check = main.querySelector('.cec-check-link');
+  if (check) {
+    const fix = check.querySelector('.cec-check-fix');
+    if (fix) check.before(fix);
+    second.append(check);
+  }
+  second.append(didnt);
+  $('#cec-restart').onclick = () => { if (!state.busy) appRestart(); };
+  $('#cec-report-open').onclick = toggleReport;
+  mountWalks();
+  wireOnward();
+  const heading = root().querySelector('h2');
+  if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
+  painted = true;
+  keyHelp?.refresh();
+}
+
+// A failure (or a line that points at the steps below) in a keys screen
+// shows its by-hand half, where the way on is.
+function appShowManual(el) {
+  const body = el?.closest?.('.cec-app-body.has-keys');
+  if (body) body.classList.add('is-manual');
+}
+// The by-hand half, shown (a preview's &manual=1).
+function appManual() {
+  root().querySelector('.cec-app-body.has-keys')?.classList.add('is-manual');
+}
+
+// One line under the title. TI Connect CE holding the calculator is a
+// failure's line (open_failed), not a warning up front.
+function appConnect() {
+  const usb = !!navigator.usb;
+  paint(appScreen({
+    cls: 'cec-app-connect',
+    top: `<div class="cec-app-hero"><img src="${ART}" alt="" width="280" height="112"></div>`,
+    title: 'Connect your calculator',
+    lead: 'Plug your TI-84 Plus CE into this computer and turn it on.',
+    actions: `<div class="cec-actions" data-status>${appBtn('cec-go', 'Connect', { disabled: !usb, big: true })}</div>`,
+    after: usb ? '<p class="cec-app-hint cec-app-pickline">In the list that opens, click your calculator, then Connect.</p>'
+      : '<p class="cec-app-hint">Direct USB needs Chrome or Edge on a computer.</p>',
+  }), 0, 'connect');
+  if (!usb) return;
+  wireConnect();
+}
+
+function appWinFix(kind) {
+  const fix = WIN_FIX[kind];
+  paint(appScreen({
+    cls: 'cec-app-win',
+    title: fix.heading,
+    lead: fix.sub,
+    actions: `<ol class="cec-app-steps">${fix.steps.map(step => `<li>${step}</li>`).join('')}</ol>
+      <div class="cec-actions">${appBtn('cec-go', 'Connect')}</div>`,
+  }), 0, `win_${kind}`);
+  wireConnect();
+}
+
+// Before a route's install: a jailbreak already on the calculator skips it.
+// v3: AsmHook2 among the apps (it only needs turning on). v2.1: program A
+// that is arTIfiCE v2.1 byte for byte (its size, then its SHA-256 read back).
+function appRoute() {
+  const route = state.info.route;
+  const next = {
+    v21: ['Install the jailbreak', viewFilesV21],
+    v3: ['Install the jailbreak', checkInequalz],
+  }[route];
+  const i = state.info;
+  // The page presses the v3 keys only with the keys on (and in English).
+  let auto = false;
+  const found = `<p class="cec-app-found">${next ? ICON.check : ''}<span>${esc(modelLabel(i.model))}</span><span>OS ${esc(i.os)}</span></p>`;
+  const action = next ? appBtn('cec-next', next[0], { big: true })
+    : route === 'unknown' ? appBtn('cec-again', 'Connect again')
+    : appLink(AUTHOR, 'See the versions it covers', { blank: true });
+  paint(appScreen({
+    top: found,
+    title: ROUTES[route].heading,
+    lead: next ? (route !== 'v3' ? '' : auto ? 'The page does every step for you.' : 'It takes a few steps on your calculator.')
+      : route === 'unknown' ? 'Check the About screen on the calculator, then connect again.'
+      : 'arTIfiCE\'s author lists every version it covers.',
+    actions: `<div class="cec-actions">${action}</div>`,
+    after: next && appByHandLanguage() ? '<p class="cec-app-hint">Your calculator isn\'t set to English, so the steps show which keys to press.</p>' : '',
+  }), 1, `route_${route}`, { deadEnd: route === 'unknown' });
+  if (next) $('#cec-next').onclick = next[1];
+  const again = $('#cec-again');
+  if (again) again.onclick = () => { if (!state.busy) location.reload(); };
+  if (next && !state.jbLooked && !(PREVIEW_HOST && !transport.link)) {
+    state.jbLooked = true;
+    // After the Connect press that painted this screen has finished.
+    setTimeout(function go() { if (state.busy) setTimeout(go, 50); else appLookForJailbreak(route); }, 0);
+  }
+}
+// The keys are on for this page load, but the calculator's language keeps
+// them off (forMe): the route screen says so, calmly.
+function appByHandLanguage() {
+  let off = false;
+  return off;
+}
+// AsmHook2 among the apps (either route: it only needs turning on), else on
+// v2.1 arTIfiCE's own A.
+async function appLookForJailbreak(route) {
+  let found = '';
+  await work(async () => {
+    say('Checking your calculator.');
+    const rows = await transport.directory();
+    state.apps = rows;
+    if (rows.some(r => r.type === TYPE_FLASH_APP && /^asmhook2$/i.test(String(r.name).replace(/[\s\0]+$/, '')))) found = 'hook';
+    else if (route === 'v21' && await hasArtificeA(rows)) found = 'a';
+    say('');
+  });
+  if (!found || state.screen !== `route_${route}`) return;
+  trackStep(`${route}_found`);
+  if (found === 'hook') appHookFound();
+  else appAFound();
+}
+
+// arTIfiCE v2.1 already on (it never needs installing twice): one calm
+// screen, then how to start a game. With the AsmHook2 route on, adding
+// AsmHook2 is offered first: games then start from prgm.
+function appAFound() {
+  let hook = false;
+  paint(appScreen({
+    top: `<div class="cec-app-done">${ICON.done}</div>`,
+    title: 'Already jailbroken',
+    lead: hook ? 'arTIfiCE is already on your calculator. Add AsmHook2 and games start from the prgm menu.' : 'arTIfiCE is already on your calculator.',
+    actions: `<div class="cec-actions">${appBtn('cec-next', hook ? 'Add AsmHook2' : 'Show me how to play', { big: true })}${hook ? appQuiet('cec-keep', 'Keep it as it is') : ''}</div>`,
+  }), 1, 'v21_found');
+  $('#cec-next').onclick = () => { if (state.busy) return; if (hook) viewFilesV21(); else viewV21Run({ snake: false }); };
+  const keep = $('#cec-keep');
+  if (keep) keep.onclick = () => { if (!state.busy) appV21Run({ snake: false }); };
+}
+const TYPE_FLASH_APP = 0x24;
+// arTIfiCE v2.1's program A, as the games pages know it (gamesend's
+// JAILBREAKS): the name, a listed size of 904, then the bytes' SHA-256.
+const ARTIFICE_A = { size: 904, sha256: 'a3d6b61efdc4352b945e78d67278a1975854d4f81070c8235e0abfcf21fcfd12' };
+async function hasArtificeA(rows) {
+  const row = rows.find(r => r.name === 'A' && (r.type === 0x05 || r.type === 0x06) && r.size === ARTIFICE_A.size);
+  if (!row || !transport.link?.receive) return false;
+  try {
+    const { data } = await transport.link.receive(row.name, row.type);
+    const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+    return [...hash].map(b => b.toString(16).padStart(2, '0')).join('') === ARTIFICE_A.sha256;
+  } catch {
+    return false;
+  }
+}
+
+// v3 with AsmHook2 already there: no reset, no reinstall; one press turns it
+// on (it says Installation successful, clear takes it home), then Play.
+function appHookFound() {
+  let keys = false;
+  // AsmHook2 there means the student wants it running: with the
+  // keys, straight to the hands-off turn-on (the chain's panel over this
+  // screen, which is the way on if it stops); by hand, the keys to press.
+  paint(appScreen({
+    title: 'Turn your jailbreak back on',
+    lead: 'A RAM reset turns it off.',
+    manual: `${appWalk('ce-jb-v3-turnon')}
+      <div class="cec-actions">${appBtn('cec-next', 'Done', { big: true })}</div>`,
+  }), 1, 'v3_found');
+  $('#cec-next').onclick = viewPlay;
+}
+
+function appNative() {
+  if (HOST) return appStart({ title: 'No jailbreak needed', lead: `Games already run on OS ${esc(state.info.os)}.`, screen: 'native', step: 1 });
+  paint(appScreen({
+    title: ROUTES.native.heading,
+    lead: `Games already run on OS ${esc(state.info.os)}.`,
+    actions: `<div class="cec-actions" data-status>${appBtn(GAME.id, `Send ${GAME.label}`, { big: true })}</div>`,
+    more: offersOs540(state.info.os) ? appMore('Or update to OS 5.4.0', os540Box()) : '',
+  }), 1, 'native');
+  wireSends();
+  const tiplanet = $('#cec-os540-get');
+  if (tiplanet) tiplanet.addEventListener('click', () => trackStep('native_os540'));
+}
+
+function appNoInequalz() {
+  paint(appScreen({
+    title: 'Install Inequality Graphing first',
+    lead: 'arTIfiCE v3 installs through this TI app.',
+    // One family of buttons: the next step's is filled, the others outlined,
+    // and a step done is ticked.
+    actions: `<ol class="cec-app-steps cec-app-steps-do" id="cec-ineq-steps">
+        <li data-step="get"><span>Get the app from TI. The file ends in <code>.8ek</code>.</span><a id="cec-get-app" class="cec-btn cec-btn-step" href="${INEQUALZ_URL}" target="_blank" rel="noopener nofollow">Get it from TI</a></li>
+        <li data-step="pick"><span id="cec-pick-text">Pick the file you downloaded.</span><label class="cec-btn cec-btn-alt cec-btn-step cec-app-file" id="cec-pick-app">Choose file<input type="file" id="cec-app" accept=".8ek"></label></li>
+        <li data-step="send"><span>Send it to the calculator.</span></li>
+      </ol>
+      <div class="cec-actions">${appBtn('cec-send-app', 'Send the app', { disabled: true, big: true })}</div>`,
+  }), 2, 'no_inequalz');
+  state.pickedApp = null;
+  // The next step: get (nothing done yet), pick (TI's page opened), send (a file picked).
+  let next = 'get';
+  const order = ['get', 'pick', 'send'];
+  const mark = () => {
+    $('#cec-ineq-steps')?.querySelectorAll('li').forEach(li => {
+      li.classList.toggle('is-done', order.indexOf(li.dataset.step) < order.indexOf(next));
+      li.classList.toggle('is-next', li.dataset.step === next);
+    });
+    $('#cec-get-app')?.classList.toggle('cec-btn-alt', next !== 'get');
+    $('#cec-pick-app')?.classList.toggle('cec-btn-alt', next !== 'pick');
+  };
+  state.afterWork = () => {
+    const b = $('#cec-send-app');
+    if (b) b.disabled = !state.pickedApp;
+    mark();
+  };
+  state.afterWork();
+  $('#cec-get-app').addEventListener('click', () => { if (next === 'get') { next = 'pick'; mark(); } });
+  // A file picked (the preview's no-inequalz-picked too).
+  state.markInequalz = (step, name) => {
+    next = step;
+    $('#cec-pick-text').textContent = `${name} is picked.`;
+    state.afterWork();
+  };
+  $('#cec-app').onchange = e => work(async () => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const app = parseFlashApp(bytes);
+    state.pickedApp = bytes;
+    state.markInequalz('send', app.name || file.name);
+    say('');
+  });
+  $('#cec-send-app').onclick = () => work(async () => {
+    const picked = state.pickedApp;
+    if (!picked) throw refusal('NO_FILE', 'Choose the .8ek file first.');
+    const sending = 'Sending the app. Leave the cable alone until it finishes.';
+    say(sending);
+    await tracked('TI_INEQUALZ', () => transport.sendApp(picked, {
+      onProgress: (done, total) => say(total ? `${sending} ${Math.min(99, Math.round((done / total) * 100))}%` : sending),
+    }));
+    say(sending);
+    await confirmInequalz('The app was sent but the calculator still does not list it. Check the apps menu yourself, then press Start over.');
+  });
+}
+
+function appInequalzUnsure() {
+  paint(appScreen({
+    title: 'Check for Inequalz on the calculator',
+    lead: 'Press <kbd>apps</kbd> on your calculator and look for Inequalz.',
+    actions: `<div class="cec-actions">${appBtn('cec-next', 'Inequalz is on the calculator', { big: true })}${appQuiet('cec-recheck', 'Check again')}</div>`,
+    more: appMore('Not there?', '<p><button type="button" class="cec-inline" id="cec-ineq-send">Send it from this page</button></p>'),
+  }), 2, 'inequalz_unsure');
+  $('#cec-next').onclick = viewV3Reset;
+  $('#cec-recheck').onclick = () => work(() => confirmInequalz('The calculator still did not list its apps. Carry on from the apps menu if you can see Inequalz there.'));
+  $('#cec-ineq-send').onclick = () => { if (!state.busy) viewNoInequalz(); };
+}
+
+const ARCHIVE_LINK = `<a href="${ARCHIVING}" target="_blank" rel="noopener nofollow">Archive</a>`;
+// v3's RAM step. With the keys on (and the chain not yet running) it is the
+// one screen before everything: what the page will do, the erase warning, one
+// button. Under the chain, and with the keys off, it is the steps by hand.
+function appV3Reset() {
+  let keys = false;
+  paint(appScreen({
+    title: 'Clear the calculator\'s RAM',
+    lead: 'arTIfiCE v3 needs a clear RAM.',
+    after: appWarn(`Erases every program that is not archived. ${ARCHIVE_LINK} what you want to keep.`),
+    manual: `${appWalk('ce-jb-reset-ram')}
+      <div class="cec-actions">${appBtn('cec-next', 'The RAM is cleared', { big: true })}</div>`,
+  }), 2, 'v3_reset');
+  $('#cec-next').onclick = viewV3Installer;
+}
+
+// A files screen (filesScreen's twin): the same fetch, pins, fallback picker
+// and gate; `actions` holds #cec-next (and #cec-only where it is offered).
+function appFilesScreen({ files, tag, step, screen, title, lead = '', top = '', actions = '', after = '', manual = '', more = '', onSend, gate = null }) {
+  paint(appScreen({
+    top, title, lead, manual, more, after,
+    actions: `${actions}
+      <div id="cec-fallback" class="cec-app-fallback" hidden>
+        <p>This file did not load from this site. Download it from the author's release page and pick it here.</p>
+        <ul class="cec-files" id="cec-filelist">${files.map(f => `
+          <li data-file="${esc(f.file)}"><span class="cec-name">${esc(f.file)}</span><span class="cec-state"></span></li>`).join('')}</ul>
+        <p class="cec-app-fallback-row">${appLink(RELEASE(tag), `Open the ${esc(tag)} release page`, { quiet: true, blank: true })}
+          <label class="cec-app-file">Choose the file<input type="file" id="cec-pick" accept=".8xp,.8xv"></label></p>
+      </div>`,
+  }), step, screen);
+  state.screenFiles = files;
+  state.gate = gate;
+  state.afterWork = renderPicked;
+  $('#cec-pick').onchange = e => work(async () => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    parseVariable(bytes);
+    const spec = await identifyOfficial(state.info.route, bytes);
+    if (!spec || !files.some(f => f.file === spec.file)) {
+      throw refusal('WRONG_FILE', `${file.name} is not the file this step needs. Download it again from the author's release page.`);
+    }
+    state.picked[spec.file] = { bytes, spec };
+    say('');
+  }).then(renderPicked);
+  $('#cec-next').onclick = onSend;
+  renderPicked();
+  return fetchHosted(files);
+}
+// What a files screen sends, as cards.
+const appFileCards = cards => `<div class="cec-app-files">${cards.map(([icon, name, what]) => `
+    <div class="cec-app-filecard"><span class="cec-app-fileicon">${ICON[icon]}</span><span><b>${name}</b>${what ? `<small>${what}</small>` : ''}</span></div>`).join('')}</div>`;
+
+function appFilesV21() {
+  state.v21 = resumable([sendArtificeV21, () => sendGameTo(GAME)]);
+  appFilesScreen({
+    files: OFFICIAL.v21.files,
+    tag: OFFICIAL.v21.tag,
+    step: 2,
+    screen: 'files_v21',
+    top: appFileCards([['file', 'arTIfiCE v2.1', 'becomes program A'], ['game', 'Snake', 'a game to try']]),
+    title: 'Send arTIfiCE v2.1 and Snake',
+    actions: `<div class="cec-actions">${appBtn('cec-next', 'Send arTIfiCE and Snake', { disabled: true, big: true })}<button type="button" id="cec-only" class="cec-quiet cec-plain cec-alt" disabled>Send only arTIfiCE</button></div>`,
+    onSend: sendV21,
+  });
+  $('#cec-only').onclick = sendV21Only;
+}
+
+function appV3Installer() {
+  const fetched = appFilesScreen({
+    files: [OFFICIAL.v3.files[0]],
+    tag: OFFICIAL.v3.tag,
+    step: 2,
+    screen: 'v3_installer',
+    top: appFileCards([['file', 'arTIfiCE', 'the installer']]),
+    title: 'Send the installer program',
+    actions: `<div class="cec-actions">${appBtn('cec-next', 'Send the installer', { disabled: true, big: true })}</div>`,
+    onSend: sendV3Installer,
+  });
+}
+
+function appV3Inequalz() {
+  const trigger = OFFICIAL.v3.files[1];
+  let keys = false;
+  const fetched = appFilesScreen({
+    files: [trigger],
+    tag: OFFICIAL.v3.tag,
+    step: 2,
+    screen: 'v3_inequalz',
+    title: 'Open Inequalz, then finish the install',
+    manual: `${appWalk('ce-jb-v3-open-inequalz')}
+      <div class="cec-actions"><label class="cec-confirm"><input type="checkbox" id="cec-open"> Inequalz is open on its Y= screen</label>${appBtn('cec-next', 'Finish the install', { disabled: true })}</div>`,
+    more: appMore('What happens next?', '<p>The calculator restarts on its own when the install finishes.</p>'),
+    onSend: sendV3Trigger,
+    gate: () => !!$('#cec-open')?.checked,
+  });
+  $('#cec-open').onchange = renderPicked;
+}
+
+function appV3Finish() {
+  let keys = false;
+  paint(appScreen({
+    title: 'Turn on the jailbreak',
+    manual: `${appWalk('ce-jb-v3-asmhook')}
+      <div class="cec-actions">${appBtn('cec-next', 'Done', { big: true })}</div>`,
+  }), 2, 'v3_finish');
+  $('#cec-next').onclick = viewPlay;
+}
+
+// How to start a game, as keys, for the route and OS: the one way the
+// last screen teaches.
+function appStartLines(name) {
+  const os = String(state.info?.os || '');
+  const route = state.info?.route;
+  // AsmHook2 switched on (the AsmHook2 route, or Turn it on): games from prgm.
+  if (route === 'v21' && state.hookOn) return [`Press <kbd>prgm</kbd>, pick ${name}, then press <kbd>enter</kbd> twice.`];
+  if (route === 'v21') return ['Press <kbd>prgm</kbd>, pick A, then press <kbd>enter</kbd> twice.', `Pick ${name} and press <kbd>enter</kbd>.`];
+  if (route === 'native' && needsAsm(os)) return ['Press <kbd>2nd</kbd> <kbd>0</kbd>, pick Asm( and press <kbd>enter</kbd>.', `Press <kbd>prgm</kbd>, pick ${name}, then press <kbd>enter</kbd> twice.`];
+  return [`Press <kbd>prgm</kbd>, pick ${name}, then press <kbd>enter</kbd> twice.`];
+}
+// The first prgm is the key help (a picture of the key on hover or click).
+const appStartList = name => `<ol class="cec-app-start">${appStartLines(name).map(l => `<li>${l}</li>`).join('').replace('<kbd>prgm</kbd>', keyHelpHtml('cec'))}</ol>
+    <p class="cec-app-hint">On a Python edition, <kbd>prgm</kbd> first asks TI-Basic or Python. Pick TI-Basic.</p>`;
+// The last screen: how to start a game, and the way on. `send` is the Snake
+// row a screen shows above it when no game is on the calculator yet.
+function appStart({ title = 'Your calculator is jailbroken', lead = '', screen, step = 3, name = 'your game', keys = '', send = '', tail = '' }) {
+  state.jailbroken = true;
+  paint(appScreen({
+    top: `<div class="cec-app-done">${ICON.done}</div>`,
+    title,
+    lead,
+    actions: `${send}${appStartList(name)}${keys}<div class="cec-actions cec-app-onward">${appOnward()}</div>`,
+    tail,
+  }), step, screen);
+}
+// After Snake goes on the Play or native screen: that screen becomes the last one.
+function appSent() {
+  const screen = root().querySelector('.cec-app')?.dataset.screen;
+  if (screen !== 'play' && screen !== 'native') return;
+  const body = root().querySelector('.cec-app-body');
+  if (!body) return;
+  body.innerHTML = `<div class="cec-app-done">${ICON.done}</div><h2 tabindex="-1">${GAME.label} is ready to play</h2>
+    <p class="cec-sub">To start it:</p>
+    ${keepKeyPunctuation(appStartList('SNAKE'))}
+    <div class="cec-actions cec-app-onward">${appOnward()}</div>
+    ${state.info?.route === 'v3' || state.hookOn ? APP_LASTS : ''}`;
+  body.querySelector('h2').focus({ preventScroll: true });
+  wireOnward();
+  say('');
+}
+
+function appPlay() {
+  let home = false;
+  state.jailbroken = true;
+  // Both AsmHook2 routes: what to do after a RAM reset.
+  const tail = state.info?.route === 'v3' || state.hookOn ? APP_LASTS : '';
+  // A host page: its own game (the one the student was sending), sent by the
+  // page itself once the popup lets the calculator go; or back to the page.
+  if (HOST) {
+    paint(appScreen({
+      top: home ? `<div class="cec-app-done">${ICON.done}</div>` : '',
+      title: 'Your calculator is jailbroken',
+      lead: `${forGame && forAgain ? `Start ${esc(forGame)} from prgm now, or send it again.` : forGame ? `You can put ${esc(forGame)} on it now.` : 'You can put a game on it now.'}${home ? '' : ' Press <kbd>clear</kbd> until the home screen shows first.'}`,
+      actions: `<div class="cec-actions cec-app-onward">${forGame ? appBtn('cec-app-sendfor', `Send ${esc(forGame)}${forAgain ? ' again' : ''}`, { big: true }) : ''}${appOnward({ alt: !!forGame })}</div>`,
+      tail,
+    }), 3, 'play');
+    const send = $('#cec-app-sendfor');
+    if (send) send.onclick = () => appClose({ release: true, send: true });
+    return;
+  }
+  paint(appScreen({
+    top: home ? `<div class="cec-app-done">${ICON.done}</div>` : '',
+    title: 'Your calculator is jailbroken',
+    lead: 'You can put a game on it now.',
+    actions: `${appPlayNext(home)}<div class="cec-actions" data-status>${appBtn(GAME.id, `Send ${GAME.label}`, { big: true })}${appOnward({ alt: true })}</div>`,
+    tail,
+  }), 3, 'play');
+  wireSends();
+}
+// What to do before Send, in the screen's words: the home screen first, and
+// after the restart, the second pick in the device list (it reads as part of
+// the step, not a status line).
+function appPlayNext(home) {
+  const repick = transport.poisoned && !playLink;
+  const send = `click Send ${GAME.label}`;
+  const text = !home && repick ? `Press <kbd>clear</kbd> until the home screen shows. Then ${send} and pick your calculator in the list again.`
+    : !home ? `Press <kbd>clear</kbd> until the home screen shows, then ${send}.`
+    : repick ? `Your calculator restarted, so ${send} and pick it in the list again.` : '';
+  return text ? `<p class="cec-app-next">${text}</p>` : '';
+}
+
+// v2.1's last screen: how to start a game (A, then the game), with Run it for
+// me where the keys are on. A Snake row first when no game went with A.
+function appV21Run({ snake, only = false }) {
+  if (BACK) return viewBack('arTIfiCE is on the calculator as program A.');
+  state.jailbroken = true;
+  let keys = false;
+  let check = '';
+  check = RUN_CHECK ? checkBlock('plain') : '';
+  const game = snake ? GAME.name : HOST ? 'your game' : 'a game';
+  paint(appScreen({
+    // The done mark once a game is on (or the host page sends one).
+    top: snake || HOST ? `<div class="cec-app-done">${ICON.done}</div>` : '',
+    title: snake ? `${GAME.label} is ready to play` : 'Your calculator is jailbroken',
+    lead: snake ? 'To start it:' : HOST ? 'arTIfiCE is on your calculator. Close this and send your game.' : 'You can put a game on it now.',
+    actions: `${snake || HOST ? '' : `<div class="cec-actions" data-status>${appBtn(GAME.id, `Send ${GAME.label}`)}</div>`}
+      ${appStartList(game)}
+      ${keys ? appRunKeys(!snake) : ''}
+      <div class="cec-actions cec-app-onward">${appOnward({ alt: keys || !(snake || HOST) })}</div>`,
+    // The pictures only where Run it for me stopped: the start lines say the same keys.
+    manual: keys ? appWalk('ce-jb-v21-run') : '',
+    tail: check,
+  }), 3, runScreen({ snake, only }));
+  if (!snake && !HOST) wireSends();
+  if (RUN_CHECK) wireCheck('plain');
+}
+// The Run screen's keys row; hidden until a game is on (sendGameButton shows it).
+function appRunKeys(hidden) {
+  let html = '';
+  return html;
+}
+
+function appBack(lead) {
+  paint(appScreen({
+    top: `<div class="cec-app-done">${ICON.done}</div>`,
+    title: 'Your calculator is jailbroken',
+    lead,
+    actions: BACK ? `<div class="cec-actions">${appLink(esc(BACK.href), `Go back to ${esc(BACK.name)}`, { big: true })}</div>` : '',
+  }), 3, 'back');
+}
+
+function appUnavailable(kind) {
+  trackStep('no_webusb');
+  state.screen = 'no_webusb';
+  const [title, text] = NO_USB[kind];
+  const copy = kind === 'computer' && !!navigator.clipboard?.writeText;
+  // The popup's one size; with Copy link the main button, Do it by hand is
+  // the help link in its usual spot.
+  const byHand = appLink(WRITTEN, 'Do it by hand', { quiet: copy });
+  root().innerHTML = `<section class="cec-card cec-app" data-screen="no_webusb"><div class="cec-app-main"><div class="cec-app-body">
+    <div class="cec-app-hero"><img src="${ART}" alt="" width="280" height="112"></div>
+    <h2 tabindex="-1">${esc(title)}</h2>
+    <p class="cec-sub">${esc(text)}</p>
+    <div class="cec-actions">${copy ? appBtn('cec-copy', 'Copy link', { big: true }) : byHand}</div>
+    <p class="cec-status" role="status" aria-live="polite" id="cec-status"></p></div>
+    <div class="cec-app-second">${copy ? `<p>${byHand}</p>` : ''}</div></div>
+    <div class="cec-foot">${appCredits()}</div></section>`;
+  if (!copy) return;
+  $('#cec-copy').onclick = async () => {
+    trackStep('no_webusb_copy');
+    try {
+      await navigator.clipboard.writeText(location.origin + '/ti84plusce-jailbreak-tutorial/');
+      say('Link copied. Paste it into the address bar in Chrome or Edge.');
+    } catch {
+      say(`Copy this address into Chrome or Edge: ${location.origin}/ti84plusce-jailbreak-tutorial/`);
+    }
+  };
+}
+
+// --- The popup ----------------------------------------------------------------
+// #cec moves into a <dialog> inside #cec-shell (so every app style still
+// applies). On this page a card opens it; on a host page, a click on a link to
+// this page does (the link still works where this module never loads). The
+// first screen paints on the first open, so `connect` counts students who
+// opened it (ce_step app_open counts the opens).
+let dialog = null, appFirst = null, appOpened = false, appRootEl = null;
+// A host page's #cec back into the popup.
+function appAttach() {
+  if (appRootEl && dialog) { dialog.append(appRootEl); appRootEl = null; }
+}
+function appBoot() {
+  const shell = $('#cec-shell');
+  if (!shell) return;
+  shell.dataset.app = 'on';
+  const cec = root();
+  cec.innerHTML = '';
+  dialog = document.createElement('dialog');
+  dialog.className = 'cec-dialog';
+  dialog.setAttribute('aria-label', 'Jailbreak your calculator');
+  dialog.innerHTML = `<button type="button" class="cec-dialog-x" aria-label="Close">${ICON.close}</button>`;
+  cec.before(dialog);
+  dialog.append(cec);
+  if (HOST) { appRootEl = cec; cec.remove(); }
+  dialog.querySelector('.cec-dialog-x').onclick = () => appClose();
+  dialog.addEventListener('cancel', e => {
+    e.preventDefault();
+    // Escape in Plexy's panel tucks Plexy away; it never closes the popup.
+    if (document.activeElement?.closest?.(PLEXY)) return;
+    appClose();
+  });
+  appPlexy();
+  if (HOST) {
+    document.addEventListener('ce-jailbreak-for', e => {
+      forGame = String(e.detail?.label || '') || null;
+      forAgain = !!e.detail?.again;
+    });
+    document.addEventListener('click', e => {
+      const a = e.target?.closest?.('a[href]');
+      if (!a || dialog.contains(a)) return;
+      let url = null;
+      try { url = new URL(a.getAttribute('href'), location.href); } catch { return; }
+      if (url.origin !== location.origin || url.pathname !== '/ti84plusce-jailbreak-tutorial/' || url.hash) return;
+      e.preventDefault();
+      // After the page's own handlers (a prompt closing on this click).
+      setTimeout(appOpen, 0);
+    }, true);
+    appReopen();
+    return;
+  }
+  shell.insertAdjacentHTML('afterbegin', `<section class="cec-launch">
+    <img class="cec-launch-art" src="${ART}" alt="" width="280" height="112">
+    <div class="cec-launch-text"><p class="cec-launch-eyebrow">Installer</p><p class="cec-launch-title">Jailbreak your calculator in the browser</p>
+      <p class="cec-launch-sub">Plug in your TI-84 Plus CE. This page picks the right jailbreak and installs it.</p></div>
+    ${appBtn('cec-launch', 'Start', { big: true })}</section>`);
+  $('#cec-launch').onclick = appOpen;
+  appReopen();
+}
+// After Start over (appRestart), straight back into the popup.
+function appReopen() {
+  let again = false;
+  try { again = !!sessionStorage.getItem('cec-reopen'); sessionStorage.removeItem('cec-reopen'); } catch { /* no storage */ }
+  if (again && !(PREVIEW_HOST && new URLSearchParams(location.search).has('screen'))) setTimeout(appOpen, 0);
+}
+function appOpen() {
+  if (!dialog) return;
+  appAttach();
+  if (!appOpened) {
+    appOpened = true;
+    trackStep('app_open');
+    appFirst?.();
+  } else if (!dialog.open) {
+    // Every fresh open starts at step 1 (a closed popup never runs
+    // a step, so nothing is cut short). Within one open, nothing restarts.
+    appFresh();
+    trackStep('app_reopen');
+    appFirst?.();
+  }
+  if (!dialog.open) {
+    dialog.showModal();
+    appFloat(true);
+    // The screen's heading, not the close button, takes the focus.
+    root()?.querySelector('h2')?.focus({ preventScroll: true });
+  }
+}
+// Back to before the first screen: the links let go (the quiet connect or
+// Connect makes a new one), and every step's state cleared. Per-page-load
+// counters (reported, answered, keyTries) stay, so nothing counts twice.
+function appFresh() {
+  for (const l of [transport.link, playLink]) if (l) l.close().catch(() => {});
+  Object.assign(transport, { link: null, info: null, poisoned: false });
+  playLink = null;
+  handoff.held(false);
+  Object.assign(state, {
+    step: 0, info: null, picked: {}, screenFiles: [], pickedApp: null, gate: null, afterWork: null, v21: null, deadEnd: false, screen: '',
+    jailbroken: false, marked: false, hookOn: false, homeConfirmed: false, quietTried: false, jbLooked: false, lastKeys: null,
+  });
+}
+// Closing keeps where the student is (the card opens it there again), except
+// while the page is working on the calculator. `release` (Back to the host
+// page) lets go of the calculator so that page can connect.
+// On a host page, once the calculator is jailbroken, any close lets it go
+// and tells the page (cec-jailbroken, { send }: CE Send connects again and,
+// with `send`, sends the game it was sending), after the links have closed.
+function appClose({ release = false, send = false } = {}) {
+  if (!dialog) return;
+  let running = state.busy;
+  if (running) {
+    say('Wait until this step finishes. Leave the calculator plugged in.');
+    return;
+  }
+  // Also when the popup had the calculator (the quiet connect took it from the page).
+  const tell = HOST && (state.jailbroken || !!transport.link);
+  if (release || tell) {
+    const closing = [transport.link, playLink].filter(Boolean).map(l => l.close().catch(() => {}));
+    if (transport.link) transport.poisoned = true;
+    playLink = null;
+    handoff.held(false);
+    if (tell) {
+      trackStep(send ? 'app_host_send' : 'app_host_back');
+      Promise.all(closing).then(() => document.dispatchEvent(new CustomEvent('cec-jailbroken', { detail: { send } })));
+    }
+    // The next open is told its game again, if any (CE Send's prompt or help button).
+    forGame = null;
+    forAgain = false;
+  }
+  dialog.close();
+  appFloat(false);
+  if (HOST) { appRootEl = root(); appRootEl?.remove(); }
+}
+
+// Plexy's panel and pill, and the prgm key's picture, are added to the end of
+// <body>. A modal dialog leaves everything outside it inert and under it, so
+// while the popup is open they live inside it (above its content: their own
+// fixed position and z-index), and go back when it closes. Plexy still reads
+// this page (#cec is in it, the installer's ce_step events reach it).
+const PLEXY = '.hp-panel, .hp-pill';
+const FLOATERS = `${PLEXY}, #cec-keyhelp-pop`;
+function appFloat(into) {
+  if (!dialog) return;
+  for (const el of document.querySelectorAll(FLOATERS)) {
+    if (into && el.parentElement !== dialog) {
+      dialog.append(el);
+      // Plexy focused its box while it was still outside (inert): again, now it can take it.
+      if (el.matches('.hp-panel') && !el.hidden && !el.contains(document.activeElement)) el.querySelector('textarea')?.focus();
+    }
+    if (!into && el.parentElement === dialog) document.body.append(el);
+  }
+}
+function appPlexy() {
+  // Anything Plexy opens while the popup is open comes inside it.
+  new MutationObserver(() => { if (dialog?.open) appFloat(true); }).observe(document.body, { childList: true });
+  // Plexy closed with its X: the popup's heading takes the focus back.
+  new MutationObserver(() => {
+    const panel = dialog?.querySelector('.hp-panel'), pill = dialog?.querySelector('.hp-pill');
+    if (!dialog?.open || !panel || !panel.hidden || (pill && !pill.hidden)) return;
+    if (!document.activeElement || document.activeElement === document.body || document.activeElement.closest?.(PLEXY)) {
+      root()?.querySelector('h2')?.focus({ preventScroll: true });
+    }
+  }).observe(dialog, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
+}
+// Start over: the page reloads (every link and state starts clean) and the
+// popup opens again on Connect.
+function appRestart() {
+  try { sessionStorage.setItem('cec-reopen', '1'); } catch { /* the card opens it */ }
+  location.reload();
+}
+// The first screen, painted on the first open.
+const appFirstScreen = fn => { appFirst = fn; };
 // --- The manual installation under the wizard ------------------------------
 // The page's own HTML (#jbg) holds every route and every step, readable with
 // no script at all. Here each walk list (<ol class="jbg-walk" data-walk>)
@@ -1447,6 +2352,15 @@ const PREVIEW_SCREENS = {
   'v3-inequalz': ['5.8.5', viewV3Inequalz],
   'v3-finish': ['5.8.5', viewV3Finish],
   'play-v3': ['5.8.5', viewPlay],
+  // App states with no screen of their own: the device list open over
+  // Connect, the wait for the restart, Play once Snake went.
+  'connect-picking': ['5.8.5', () => { viewConnect(); say('Pick your calculator in the browser window that opens.'); }],
+  'play-v3-sent': ['5.8.5', () => { viewPlay(); appSent(); }],
+  'play-v3-restarted': ['5.8.5', () => { transport.poisoned = true; viewPlay(); }],
+  'native-sent': ['5.3.0.0037', () => { viewNative(); appSent(); }],
+  'v21-found': ['5.8.4.0058', appAFound],
+  'v3-found': ['5.8.5', appHookFound],
+  'no-inequalz-picked': ['5.8.5', () => { viewNoInequalz(); state.pickedApp = new Uint8Array(1); state.markInequalz('send', 'Inequalz'); }],
 };
 function installPreview() {
   if (!PREVIEW_HOST) return false;
@@ -1481,10 +2395,17 @@ function installPreview() {
   if (q.get('cros')) forceChromeOS = true;
   const want = q.get('screen');
   if (want && PREVIEW_SCREENS[want]) {
+    if (APP) appAttach();
     window.__cecPreview(want);
     if (q.get('picked')) window.__cecPreviewPicked();
     if (q.get('error')) window.__cecPreviewError(q.get('error'));
     if (q.get('fail')) window.__cecPreviewFail(q.get('fail'));
+    // The popup, open on the screen; &manual=1 the by-hand half, &report=1
+    // Didn't work? open, &check=yes|no an answer, &host=<name> a host page.
+    if (APP) { appOpened = true; if (dialog && !dialog.open) dialog.showModal(); root()?.querySelector('h2')?.focus({ preventScroll: true }); }
+    if (q.get('manual')) appManual();
+    if (q.get('report')) toggleReport();
+    if (q.get('check')) document.querySelector(`#cec-check [data-answer="${q.get('check')}"]`)?.click();
     return true;
   }
   return false;
@@ -1493,11 +2414,17 @@ function installPreview() {
 function boot() {
   // The manual installation needs no USB, so it comes before every check.
   mountGuide();
+  // A host page writes no #cec (Plexy's panel reads #cec as "this is the
+  // installer"): the popup makes it, and keeps it in the page only while open.
+  if (APP && HOST && !root() && $('#cec-shell')) $('#cec-shell').append(Object.assign(document.createElement('div'), { id: 'cec' }));
   if (!root()) return;
+  if (APP) appBoot();
+  else if ($('#cec-shell')?.dataset.app) $('#cec-shell').dataset.app = 'off';
   // First, so previews have it too.
   keyHelp = mountKeyHelp('cec', { onOpen: () => track('ce_key_help', { page: 'installer' }) });
   // Before the WebUSB check: a preview may load in a frame, which has no WebUSB.
   if (installPreview()) return;
+  if (APP && !navigator.usb) { appFirstScreen(() => unavailable()); return; }
   if (!navigator.usb) {
     unavailable();
     return;
@@ -1514,6 +2441,7 @@ function boot() {
     }
     handoff.held(holds());
   });
+  if (APP) { appFirstScreen(viewConnect); return; }
   viewConnect();
 }
 

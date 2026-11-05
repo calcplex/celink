@@ -82,7 +82,8 @@ test('connect picks a TI device, opens it, routes off its OS and keeps the free 
   const usb = picker(sim);
   await withUsb(usb, async () => {
     const t = new CETransport();
-    assert.deepEqual(await t.connect(), { model: 'TI-84 Plus CE', os: '5.8.5.0074', route: 'v3', home: true, ramFree: 154000, archiveFree: 2372475, boot: '5.0.0.0089' });
+    // language: parameter 0x0006 (9 English).
+    assert.deepEqual(await t.connect(), { model: 'TI-84 Plus CE', os: '5.8.5.0074', route: 'v3', home: true, ramFree: 154000, archiveFree: 2372475, boot: '5.0.0.0089', language: 9 });
     assert.equal(t.device, sim);
     assert.deepEqual(usb.asked[0].filters, [{ vendorId: 0x0451 }]);
   });

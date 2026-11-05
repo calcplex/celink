@@ -49,7 +49,7 @@ export const ROUTES = {
   native: {
     label: 'No jailbreak needed',
     heading: 'No jailbreak needed',
-    reason: 'Assembly programs already run on this version, so there is nothing to install.',
+    reason: 'Assembly programs already run on this version.',
   },
   v21: {
     label: 'arTIfiCE v2.1',
@@ -69,7 +69,7 @@ export const ROUTES = {
   unknown: {
     label: 'Version not recognised',
     heading: 'The version could not be read',
-    reason: 'This version was not recognised, so no route was picked and nothing will be sent.',
+    reason: 'This version was not recognised.',
   },
 };
 
@@ -85,9 +85,13 @@ export function launchesArchived(version) {
   return major === 5 && minor >= 3;
 }
 
-/** How to start the assembly program `name`, as one sentence. */
-export function startHint(version, name) {
-  if (compatibility(version) === 'v21') return `Press prgm, run A, and pick ${name}.`;
+/**
+ * How to start the assembly program `name`, as one sentence. `route` is the
+ * calculator's start route when the page knows its tools (gamesend's
+ * startRoute: v21 with AsmHook2 starts from prgm, as v3).
+ */
+export function startHint(version, name, route = compatibility(version)) {
+  if (route === 'v21') return `Press prgm, run A, and pick ${name}.`;
   // The home screen line is Asm(prgmNAME, with no closing parenthesis.
   if (needsAsm(version)) return `Start it with Asm(: press 2nd, then 0 to open the catalog, scroll down to Asm( and press enter, then press prgm, pick ${name}, and press enter.`;
   return `Press prgm, pick ${name}, and press enter twice.`;
@@ -405,6 +409,32 @@ export function startHelpAnswer(route, choice, { os, name, jb, shell: shellName 
   return answer ? answer() : [];
 }
 
+// With the installer app (ce_jb_app): where the fix is the jailbreak, the
+// answer is a button that opens it (the page's own jailbreak button, `button:
+// true`), not a sentence about the installer; ERROR: INVALID on a hook
+// calculator is the hook off, so its button turns it back on, and the keys by
+// hand stay under it. Otherwise startHelpAnswer's own parts.
+export const TURN_ON = Object.freeze({ link: 'installer', button: true, text: 'Turn it back on' });
+export const REJAILBREAK = Object.freeze({ link: 'installer', button: true, text: 'Re-jailbreak' });
+export function startHelpAnswerApp(route, choice, opts) {
+  if (route === 'v3' && choice === 'invalid' && opts.jb !== 'shell') {
+    return sentences('Your jailbreak is off. A RAM reset turns it off.', [TURN_ON], `Or by hand: press apps and open AsmHook2, then start ${opts.name} again from prgm.`);
+  }
+  const parts = startHelpAnswer(route, choice, opts);
+  const out = [];
+  for (let k = 0; k < parts.length; k++) {
+    const [before, after] = [parts[k - 1], parts[k + 1]];
+    if (parts[k] === INSTALLER_LINK && typeof before === 'string' && before.endsWith(FOLLOW_INSTALLER[0]) && typeof after === 'string' && after.startsWith(FOLLOW_INSTALLER[2])) {
+      out[out.length - 1] = before.slice(0, -FOLLOW_INSTALLER[0].length);
+      out.push(REJAILBREAK);
+      const rest = after.slice(FOLLOW_INSTALLER[2].length);
+      if (rest) out.push(rest);
+      k++;
+    } else out.push(parts[k]);
+  }
+  return out.filter(p => p !== '');
+}
+
 /**
  * The author's release assets, pinned by SHA-256 (github.com/YvanTT/arTIfiCE/releases).
  * `replaces`: sent under its own name, replacing whatever variable holds it.
@@ -471,7 +501,7 @@ export function parseVariable(input) {
   }
   const name = new TextDecoder().decode(beforeNul(b.subarray(60, 68)));
   if (!/^[A-Z][A-Z0-9]{0,7}$/.test(name)) {
-    throw refusal('BAD_FILE', 'Only names beginning with A–Z and containing A–Z or 0–9 are supported.');
+    throw refusal('BAD_FILE', 'Only names that start with a letter and hold letters and digits are supported.');
   }
   if (v.getUint16(b.length - 2, true) !== checksum(b.subarray(55, b.length - 2))) throw refusal('BAD_FILE', 'The file checksum is invalid. Download it again.');
   return { name, type, payload: b.slice(72, 72 + size), bytes: b };
@@ -498,15 +528,15 @@ export function parseFlashApp(input) {
     const length = new DataView(b.buffer, b.byteOffset).getUint32(at + 74, true);
     const name = new TextDecoder().decode(beforeNul(b.subarray(at + 17, at + 25))).replace(/\s+$/, '');
     entries.push({ device: b[at + 48], data: b[at + 49], length, name });
-    if (length > b.length - (at + 78)) throw refusal('BAD_APP', 'That file is incomplete. Download it again from TI. Nothing was sent.');
+    if (length > b.length - (at + 78)) throw refusal('BAD_APP', 'That file is incomplete. Download it again from TI.');
     at += 78 + length;
   }
   if (!entries.length) throw notApp();
   if (entries.some(e => e.data === TYPE.OS)) {
-    throw refusal('BAD_APP', 'That is a calculator operating system, not an application. Nothing was sent. This page never sends an OS.');
+    throw refusal('BAD_APP', 'That is a calculator operating system, not an application. This page never sends an OS.');
   }
-  if (entries.some(e => e.device !== 0x73)) throw refusal('BAD_APP', 'That file is not for the TI-84 Plus CE family. Nothing was sent.');
-  if (entries.at(-1).data !== TYPE.FLASH_APP) throw refusal('BAD_APP', 'That file is not a calculator application. Nothing was sent.');
+  if (entries.some(e => e.device !== 0x73)) throw refusal('BAD_APP', 'That file is not for the TI-84 Plus CE family.');
+  if (entries.at(-1).data !== TYPE.FLASH_APP) throw refusal('BAD_APP', 'That file is not a calculator application.');
   const named = entries.filter(e => e.data === TYPE.FLASH_APP && e.name).at(-1);
   return { name: named?.name ?? '', entries };
 }
@@ -835,12 +865,15 @@ export function refusedAt(err) {
 // that shape.
 const freeKB = bytes => (Number.isFinite(bytes) && bytes >= 0 ? Math.floor(bytes / 1024) : undefined);
 const BOOT = /^\d{1,3}\.\d{1,3}\.\d{1,3}(\.\d{4})?$/;
-export function calcParams({ os, model, home, ramFree, archiveFree, reread, boot }) {
+// ce_lang: the calculator's language as parameter 0x0006 reads it (9 English,
+// 12 French), when the calculator gave one.
+export function calcParams({ os, model, home, ramFree, archiveFree, reread, boot, language }) {
   const ram = freeKB(ramFree), arch = freeKB(archiveFree);
   return {
     evo_os: os, evo_hw: model, ...(typeof boot === 'string' && BOOT.test(boot) ? { ce_boot: boot } : {}), ...(home === undefined ? {} : { home: home ? 1 : 0 }),
     ...(ram === undefined ? {} : { evo_ram_free: ram }), ...(arch === undefined ? {} : { evo_arch_free: arch }),
     ...(reread ? { retried: 1 } : {}),
+    ...(Number.isInteger(language) ? { ce_lang: language } : {}),
   };
 }
 

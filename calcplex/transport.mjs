@@ -5,6 +5,9 @@
 // rules, and a read-back after every send.
 import { NAMED, PROGRAM_RUNNING, checkCalculator, digest, linkDead, officialFiles, parseFlashApp, parseVariable, refusal, sameVariable } from './core.mjs';
 import { freeRamAgain, readyEach } from './gamesend.mjs';
+import { JB_MARKER, JB_MARKER_TEXT } from './gamesend.mjs';
+import { EVO_PRODUCT_ID as EVO_ID } from '../celink.mjs';
+import { makeEntry } from '../tifiles.mjs';
 import { CELink } from '../celink.mjs';
 import { TYPE, buildFile, parseAppFile, parseFile } from '../tifiles.mjs';
 
@@ -43,8 +46,16 @@ export class CETransport {
    * click's activation. `beforeOpen`, when given, runs after the picker and
    * before the calculator is opened; a throw from it ends the connect there.
    */
-  async connect({ beforeOpen } = {}) {
+  async connect({ beforeOpen, granted = false } = {}) {
     if (!navigator.usb) throw refusal('NO_WEBUSB', 'Use Chrome or Edge on a computer for direct USB. The manual guide works in other browsers.');
+    // `granted`: the one calculator the browser already allows, opened with
+    // no picker (the popup over a page that just had it). Null when there is
+    // not exactly one.
+    if (granted) {
+      const devices = (await CELink.granted()).filter(d => d.productId !== EVO_ID);
+      if (devices.length !== 1) return null;
+      this.link = CELink.fromDevice(devices[0], { appTimeout: APP_TIMEOUT_MS });
+    } else
     this.link = await CELink.request({ appTimeout: APP_TIMEOUT_MS });
     this.device = this.link.device;
     if ((await CELink.granted()).length !== 1) throw refusal('SEVERAL_CALCULATORS', 'Connect only one TI calculator, then reload and try again.');
@@ -62,6 +73,9 @@ export class CETransport {
       ...checkCalculator(calc.productName, calc.osVersion, { productNumber: calc.productNumber, usbProductId: this.device?.productId }), home: calc.atHomescreen, ramFree: calc.ramFree, archiveFree: calc.archiveFree,
       ...(calc.bootVersion ? { boot: calc.bootVersion } : {}),
       ...(calc.reread ? { reread: true } : {}),
+      // The calculator's language (parameter 0x0006: 9 English, 12 French):
+      // the page presses keys and reads screens only in English.
+      ...(Number.isInteger(calc.language) ? { language: calc.language } : {}),
     };
     return this.info;
   }
@@ -92,10 +106,10 @@ export class CETransport {
       else refused.push(f.name);
     }
     if (refused.length === 1) {
-      throw refusal('COLLISION', `${refused[0]} already exists on the calculator and this file does not replace it. Nothing was sent. Rename or delete it on the calculator, then start over.`, { names: refused });
+      throw refusal('COLLISION', `${refused[0]} already exists on the calculator and this file does not replace it. Rename or delete it on the calculator, then start over.`, { names: refused });
     }
     if (refused.length) {
-      throw refusal('COLLISION', `${refused.join(' and ')} already exist on the calculator and these files do not replace them. Nothing was sent. Rename or delete them on the calculator, then start over.`, { names: refused });
+      throw refusal('COLLISION', `${refused.join(' and ')} already exist on the calculator and these files do not replace them. Rename or delete them on the calculator, then start over.`, { names: refused });
     }
   }
 
@@ -147,7 +161,7 @@ export class CETransport {
     if (!spec) throw refusal('WRONG_ROUTE', 'This OS is not on the route that file belongs to.');
     if (entry.name !== spec.name || entry.type !== spec.type || await digest(bytes) !== spec.sha256) {
       const release = spec.file.startsWith('arTIfiCE') ? 'arTIfiCE' : 'official';
-      throw refusal('BAD_HASH', `${spec.file} does not match the verified ${release} release. Nothing was sent.`);
+      throw refusal('BAD_HASH', `${spec.file} does not match the verified ${release} release.`);
     }
     return spec;
   }

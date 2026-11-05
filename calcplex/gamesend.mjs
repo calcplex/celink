@@ -141,6 +141,8 @@ export async function identify(link) {
   return {
     model: info.productName, os: info.osVersion, boot: info.bootVersion, route: compatibility(info.osVersion),
     ramFree: info.ramFree, archiveFree: info.archiveFree, home: info.atHomescreen,
+    // The calculator's language (parameter 0x0006: 9 English), for ce_lang.
+    ...(Number.isInteger(info.language) ? { language: info.language } : {}),
   };
 }
 
@@ -191,8 +193,21 @@ export const JAILBREAKS = [
 // games start with it. A listing cannot show whether a hook is active, so
 // 'prgm' can still be wrong: a RAM reset removes the hook, and so can an
 // older shell opened after the app. Opening the app again restores it.
+// With the installer app on, also where it starts them from prgm: AsmHook2
+// does that on every route it works on (on v21 too, where the installer's
+// AsmHook2 route leaves AsmHook2 and no A; startRoute then words v21 as v3).
 export const ROUTE_START = { v21: 'A', v3: 'prgm' };
 
+// The installer's mark that AsmHook2's hook is on: a tiny AppVar it leaves in
+// RAM (never archived) each time it turns the hook on. A RAM reset, which
+// turns the hook off, deletes it too, while the AsmHook2 app stays in the
+// archive (observed in CEmu on 5.8.4). So the app
+// listed with no mark reads 'found_off': the hook is probably off. A guess:
+// Inequalz's option 2 turns the hook off and leaves the mark, and a hook
+// turned on by opening the app by hand leaves none.
+export const JB_MARKER = Object.freeze({ name: 'CPJBON', type: TYPE.APPVAR, tool: 'AsmHook2 on' });
+export const JB_MARKER_TEXT = 'CalcPlex: AsmHook2 was turned on. A RAM reset deletes this.';
+const isMarker = r => r.name === JB_MARKER.name && r.type === JB_MARKER.type && !r.archived;
 // An app's listed name, without any padding the calculator may add to a
 // name shorter than 8 characters (not seen, but it would hide the app).
 const listedName = (j, r) => (j.types.includes(TYPE.FLASH_APP) ? String(r.name).replace(/[\s\0]+$/, '') : r.name);
@@ -374,6 +389,7 @@ export async function inspect(openLink, { own = [] } = {}) {
     }
     if (real) tools.push(j.tool);
   }
+  if (rows.some(isMarker)) tools.push(JB_MARKER.tool);
   const owned = Array.isArray(own) && own.length ? await ownedRows(link, own, rows) : [];
   return { ...calc, tools, rows, owned };
 }
@@ -402,10 +418,24 @@ export function jailbreakState(route, tools) {
   if (route === 'native') return 'none';
   if (route === 'v21' || route === 'v3') {
     const works = j => tools.includes(j.tool) && j.routes.includes(route);
-    if (JAILBREAKS.some(j => works(j) && j.start === ROUTE_START[route])) return 'found';
+    // Only AsmHook2 starts games here and its mark is gone (JB_MARKER).
+    const starts = j => works(j) && (j.start === ROUTE_START[route] || j.start === 'prgm');
+    if (tools.includes('AsmHook2') && !tools.includes(JB_MARKER.tool) && !JAILBREAKS.some(j => starts(j) && j.tool !== 'AsmHook2')) return 'found_off';
+    if (JAILBREAKS.some(j => works(j) && (j.start === ROUTE_START[route] || j.start === 'prgm'))) return 'found';
     return JAILBREAKS.some(j => works(j) && j.start === 'shell') ? 'shell' : 'missing';
   }
   return 'blocked';
+}
+
+/**
+ * The route whose way of starting games applies: v21 with a tool that
+ * starts games from prgm (AsmHook2) starts them as v3 does, so its words
+ * (startHint, the "Game didn't start?" choices and answers) are v3's.
+ * Every other calculator keeps its own route.
+ */
+export function startRoute(route, tools = []) {
+  if (route !== 'v21') return route;
+  return JAILBREAKS.some(j => j.start === 'prgm' && j.routes.includes(route) && tools.includes(j.tool)) ? 'v3' : route;
 }
 
 // A variable's cost: its data, its name and the calculator's own header. On
@@ -650,7 +680,7 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   const calc = await identify(link);
   const asm = todo.some(isAssembly);
   if (asm && (calc.route === 'unsupported' || calc.route === 'unknown')) {
-    throw refusal('NO_JAILBREAK', `There's no jailbreak for OS ${calc.os} yet, so this game can't run on it. Nothing was sent.`);
+    throw refusal('NO_JAILBREAK', `There's no jailbreak for OS ${calc.os} yet, so this game can't run on it.`);
   }
   // 5.2 and earlier run a program only from RAM, so there every program goes to RAM.
   const mode = (archive === 'programs' || archive === 'programs+appvars') && !launchesArchived(calc.os) ? 'programs-ram' : archive;

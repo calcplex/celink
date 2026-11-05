@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { deflateRawSync } from 'node:zlib';
 import {
   sendGame, collectEntries, planInstall, checkSpace, library, unpackZip, crc32, gameEntries,
-  jailbreakTools, jailbreakState, shellLabel, inspect, identify, fixSizeWord, pickCalculator,
+  jailbreakTools, jailbreakState, shellLabel, inspect, identify, fixSizeWord, pickCalculator, JB_MARKER,
 } from '../gamesend.mjs';
 import { refusedAt } from '../core.mjs';
 import { CELink, VPKT } from '../../celink.mjs';
@@ -296,11 +296,13 @@ test('jailbreakTools(): each app by exact name and type, arTIfiCE\'s A by size',
   assert.deepEqual(jailbreakTools([row('CESIUM', TYPE.PROTECTED_PROGRAM), row('A', TYPE.REAL), row('PUZZLE', TYPE.PROTECTED_PROGRAM)]), [], 'installer programs and data never count');
 });
 
-test('jailbreakState(): none, found, shell, missing or blocked', () => {
+test('jailbreakState(): none, found, found_off, shell, missing or blocked', () => {
   assert.equal(jailbreakState('native', []), 'none');
   assert.equal(jailbreakState('native', ['Cesium']), 'none');
   assert.equal(jailbreakState('v21', []), 'missing');
-  assert.equal(jailbreakState('v3', ['AsmHook2']), 'found');
+  assert.equal(jailbreakState('v3', ['AsmHook2', JB_MARKER.tool]), 'found');
+  // AsmHook2 listed without the mark it writes to RAM: a RAM reset turned the hook off.
+  assert.equal(jailbreakState('v3', ['AsmHook2']), 'found_off');
   assert.equal(jailbreakState('v21', ['arTIfiCE v2.1']), 'found');
   assert.equal(jailbreakState('v3', ['Cesium']), 'shell');
   assert.equal(jailbreakState('v21', ['CEaShell']), 'shell');
