@@ -120,6 +120,14 @@ export function withKeyHelp(text, prefix) {
   return at < 0 ? esc(s) : esc(s.slice(0, at)) + keyHelpHtml(prefix) + esc(s.slice(at + 4));
 }
 
+// A "?" with its own words (os540.mjs: why update to OS 5.4.0): the prgm
+// key's button and box, the words in place of the picture (mountKeyHelp
+// reads data-help). `label` names the button for screen readers.
+export function helpHtml(prefix, text, label) {
+  const p = esc(prefix);
+  return `<button type="button" class="${p}-keyhelp" data-help="${esc(text)}" aria-label="${esc(label)}" aria-expanded="false" aria-controls="${p}-keyhelp-pop"><span class="${p}-keyhelp-q" aria-hidden="true">?</span></button>`;
+}
+
 // The box: its width, the space it keeps from the viewport's sides and from
 // the sentence, and how long a mouse rests before it opens or leaves before
 // it closes (ms).
@@ -209,6 +217,19 @@ export function mountKeyHelp(prefix, { onOpen = () => {}, doc = globalThis.docum
     key = k;
     pinned = pin;
     if (!img.getAttribute('src')) img.setAttribute('src', PRGM_KEY.src);
+    // A helpHtml key: its words, not the picture.
+    const words = k.getAttribute('data-help') || '';
+    let note = pop.querySelector(`.${cls}-note`);
+    if (words && !note) {
+      note = doc.createElement('p');
+      note.className = `${cls}-note`;
+      pop.append(note);
+    }
+    if (note) {
+      note.textContent = words;
+      note.hidden = !words;
+    }
+    img.hidden = !!words;
     k.setAttribute('aria-expanded', 'true');
     pop.hidden = false;
     place();

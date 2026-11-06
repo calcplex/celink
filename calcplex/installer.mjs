@@ -13,10 +13,15 @@
 // around it say what the device list looks like. The logic it adds is
 // connect.mjs.
 //
+// Sending OS 5.4.0: on OS 5.2 and earlier the native screen sends OS 5.4.0
+// from the file the student downloads from TI-Planet. The screens are
+// os540.mjs.
+//
 // The app panel (the app feature): the same screens drawn as one panel
 // the height of the window, one step at a time; the app block near the end.
 import { CETransport } from './transport.mjs';
 import { OS_540_URL, connectAfresh, connectFailScreen, noUsbKind, offersOs540, reconnect, runningText } from './connect.mjs';
+import { os540Screens, waitingForOS } from './os540.mjs';
 import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
   INEQUALZ_URL, LEAVE_SHELL_KEY, OFFICIAL, PREVIEW_HOST, ROUTES, RUNNING_TEXT, TICONNECT_URL, archiveMode, calcParams, compatibility, esc,
@@ -748,6 +753,7 @@ function wireConnect() {
       state.info = transport.info && !transport.poisoned ? transport.info : await connectAfresh(transport, { beforeOpen: claim });
     } catch (err) {
       if (transport.link === before) markPicker(err);
+      if (waitingForOS(err)) return os540().found();
       // A calculator picked this time that is not a CE reports its USB product id.
       trackConnectFail(err, {}, transport.link === before ? undefined : transport.link?.device);
       const next = connectFailScreen({ reason: installerFailReason(err), detail: openDetail(err), windows: onWindows(), screen: state.screen });
@@ -799,21 +805,23 @@ function viewNative() {
   wireSends();
   const tiplanet = $('#cec-os540-get');
   if (tiplanet) tiplanet.addEventListener('click', () => trackStep('native_os540'));
+  if (offersOs540(state.info.os)) os540().wire();
 }
+
+// Sending OS 5.4.0: the screens are os540.mjs's, made on first use.
+let osScreens = null;
+const os540 = () => (osScreens ??= os540Screens({
+  $, root, state, transport, work, say, paint, trackStep, claim, pickerHint, viewNative, viewRoute,
+  tiLink: TI_LINK, keyHelp: () => keyHelpHtml('cec'),
+  // In the app panel the update is its own screens, drawn with the panel's pieces.
+  app: APP ? { paint: (screen, step, name) => paint(appScreen(screen), step, name), btn: appBtn, quiet: appQuiet, warn: appWarn, archive: ARCHIVE_LINK } : null,
+}));
 
 // OS 5.2 and earlier only: the other way, updating to OS 5.4.0, where games
 // start from prgm with no Asm(. Exactly 5.4.0: from 5.5 on, assembly needs a
 // jailbreak. The OS file is TI's; the student gets it from TI-Planet's archive
 // and sends it with TI Connect CE. Never offered to any other version.
-const os540Box = () => `
-    <div class="cec-os540">
-      <p><strong>Or update to OS 5.4.0.</strong> On 5.4.0, games start from the ${keyHelpHtml('cec')} menu, with no Asm(.</p>
-      <ol>
-        <li><a id="cec-os540-get" href="${OS_540_URL}" target="_blank" rel="noopener nofollow">Download OS 5.4.0 from TI-Planet</a>. Get 5.4.0 exactly: on OS 5.5 or later, games need a jailbreak.</li>
-        <li>Send it to the calculator with TI Connect CE. Back up any programs you want to keep first.</li>
-        <li>Press Start over and connect again.</li>
-      </ol>
-    </div>`;
+const os540Box = () => os540().box();
 
 // A file input drawn as an outlined button, in the same family as the rest
 // (the browser's own "Choose File" control looked like nothing else here).
@@ -1519,7 +1527,8 @@ const appCredits = () => (CREDITS.length ? `<details class="cec-app-credits">
 // a game ready, no jailbreak needed, already jailbroken) shows the bar full.
 const appDone = () => /^(play|native|v21_found|back|v21_run)/.test(state.screen || '');
 function appProgress() {
-  const native = state.info?.route === 'native';
+  // Updating to OS 5.4.0 is the native route's Install step, done once it is.
+  const native = state.info?.route === 'native' && !/^os540_/.test(state.screen || '') && !state.os540Done;
   const done = appDone();
   const at = done ? STEPS.length - 1 : state.step;
   let fill = done ? 1 : 0.5;
@@ -1726,16 +1735,33 @@ function appHookFound() {
 }
 
 function appNative() {
+  if (os540().landed()) return appOs540Done();
   if (HOST) return appStart({ title: 'No jailbreak needed', lead: `Games already run on OS ${esc(state.info.os)}.`, screen: 'native', step: 1 });
   paint(appScreen({
     title: ROUTES.native.heading,
     lead: `Games already run on OS ${esc(state.info.os)}.`,
     actions: `<div class="cec-actions" data-status>${appBtn(GAME.id, `Send ${GAME.label}`, { big: true })}</div>`,
-    more: offersOs540(state.info.os) ? appMore('Or update to OS 5.4.0', os540Box()) : '',
+    more: offersOs540(state.info.os) ? os540().link() : '',
   }), 1, 'native');
   wireSends();
   const tiplanet = $('#cec-os540-get');
   if (tiplanet) tiplanet.addEventListener('click', () => trackStep('native_os540'));
+  if (offersOs540(state.info.os)) os540().wireLink();
+}
+
+// Connected again after this page sent OS 5.4.0: the update is the news, then
+// the game. The screen stays 'native', so Send turns it into the game's last
+// screen (appSent).
+function appOs540Done() {
+  const lead = `No jailbreak needed. Games start from the ${keyHelpHtml('cec')} menu.`;
+  if (HOST) return appStart({ title: 'You\'re on OS 5.4.0', lead, screen: 'native', step: 1 });
+  paint(appScreen({
+    top: `<div class="cec-app-done">${ICON.done}</div>`,
+    title: 'You\'re on OS 5.4.0',
+    lead,
+    actions: `<div class="cec-actions" data-status>${appBtn(GAME.id, `Send ${GAME.label}`, { big: true })}</div>`,
+  }), 1, 'native');
+  wireSends();
 }
 
 function appNoInequalz() {
@@ -2361,6 +2387,11 @@ const PREVIEW_SCREENS = {
   'v21-found': ['5.8.4.0058', appAFound],
   'v3-found': ['5.8.5', appHookFound],
   'no-inequalz-picked': ['5.8.5', () => { viewNoInequalz(); state.pickedApp = new Uint8Array(1); state.markInequalz('send', 'Inequalz'); }],
+  // Updating to OS 5.4.0 (os540.mjs), screen by screen; nothing is sent.
+  'os540-get': ['5.2.2.0043', () => os540().start()],
+  'os540-sent': ['5.2.2.0043', () => os540().sent()],
+  'os540-waiting': ['5.2.2.0043', () => os540().waiting()],
+  'os540-done': ['5.4.0.0034', () => { state.os540Done = true; viewNative(); }],
 };
 function installPreview() {
   if (!PREVIEW_HOST) return false;

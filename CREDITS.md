@@ -26,6 +26,9 @@ differs, the code says why.
 `calcplex/core.mjs` follows libtifiles for its Flash application check and
 rewords libticalcs' error descriptions.
 
+`celink-os.mjs` reads operating system files as libtifiles reads Flash files
+and sends them as libticalcs' `send_os_834pce` does (`calc_84p.cc`).
+
 ## Other
 
 - Benjamin Moody's [The TI-84 Plus USB Protocol: A Partial Analysis](https://brandonw.net/calcstuff/DirectUSB.txt)
