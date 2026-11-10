@@ -458,7 +458,8 @@ export const ARCHIVE_MARGIN = 65536;
  * a program's name to { size, ram }, a figure measured for the build of that
  * program `size` bytes long; a program it does not cover, or a different
  * build, gets the program's size plus 1 KB. Resolves { bytes, measured }, or
- * null for a send with no assembly program.
+ * null for a send with no assembly program. A figure that also gives `starts`
+ * (the measurement itself, `ram` being it plus a safety margin) adds `starts`.
  */
 export function ramToStart(entries, launchRam = null) {
   let best = null;
@@ -466,10 +467,16 @@ export function ramToStart(entries, launchRam = null) {
     const m = launchRam?.[e.name];
     const known = m && m.size === e.data.length && Number.isInteger(m.ram) && m.ram > 0;
     const bytes = known ? m.ram : e.data.length + 1024;
-    if (!best || bytes > best.bytes) best = { bytes, measured: !!known };
+    const bare = known && Number.isInteger(m.starts) && m.starts > 0 && m.starts <= m.ram ? { starts: m.starts } : {};
+    if (!best || bytes > best.bytes) best = { bytes, measured: !!known, ...bare };
   }
   return best;
 }
+
+// RAM free on a calculator with nothing else in RAM, on OS 5.2 and earlier,
+// where a program runs only from RAM: about 152.6 KB to 152.8 KB, observed in
+// an emulator on OS 5.0.1, 5.1.5 and 5.2.2 with one game's program in RAM.
+export const CLEAN_RAM = 152800;
 
 /**
  * With no I/O: what to delete and send, and whether it fits. `rows` is the
@@ -516,10 +523,20 @@ export function planInstall(entries, { rows, ramFree = null, archiveFree = null,
   const space = { ramNeed, arcNeed, arcReserve, ramBack, ramFree, archiveFree, ramShort: ramFree == null ? 0 : Math.max(0, -low) };
   const warnings = [];
   const start = ramToStart(entries, launchRam);
-  if (ramFree != null && start && balance < start.bytes) {
+  // OS 5.2 and earlier keep the program itself in RAM, so even an empty
+  // calculator can leave too little to start it: that game needs a newer OS,
+  // and gets no advice to free RAM nothing else is using. Within the margin,
+  // a clean calculator's RAM is the target, so the measured figure counts.
+  let target = start?.bytes;
+  if (archive === 'programs-ram' && start?.starts) {
+    const room = CLEAN_RAM - ramNeed;
+    if (start.starts > room) return { steps, space, warnings: [{ code: 'NEEDS_NEWER_OS' }] };
+    if (target > room) target = start.starts;
+  }
+  if (ramFree != null && start && balance < target) {
     warnings.push({
-      code: 'LOW_RAM_TO_RUN', needKB: kb(start.bytes), freeKB: Math.max(0, Math.floor(balance / 1024)),
-      shortKB: kb(start.bytes - balance), measured: start.measured,
+      code: 'LOW_RAM_TO_RUN', needKB: kb(target), freeKB: Math.max(0, Math.floor(balance / 1024)),
+      shortKB: kb(target - balance), measured: start.measured,
     });
   }
   return { steps, space, warnings };

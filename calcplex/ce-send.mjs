@@ -37,7 +37,7 @@
 // this would not mount, <html> is ce-nosend and the panel shows a one-line note.
 import {
   PROGRAMS, sendGame, collectEntries, checkSpace, planInstall, deleteGame, freeRamAgain, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
-  unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete,
+  unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete, CLEAN_RAM,
 } from './gamesend.mjs';
 import {
   DELETE_REASONS, FEEDBACK_FORM, FEEDBACK_MAX, FIND_HELP_OPEN, PREVIEW_HOST, RATE_ASK_AT, RATE_STARS, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
@@ -807,6 +807,11 @@ function sentHtml(r, main, asm, c, partial = null) {
   // A send that left parts out says so first, and its own first words replace "Sent!".
   const html = partial ? [`<p>${partial}</p>`] : [];
   const sent = partial ? '' : '<strong>Sent!</strong> ';
+  // Too big to start below OS 5.3 on any calculator.
+  if (r.warnings.some(w => w.code === 'NEEDS_NEWER_OS')) {
+    html.push('<p>This game needs OS 5.3 or newer.</p>');
+    return html.join('');
+  }
   if (asm && state === 'missing') {
     html.push(`<p>${sent}It won't start until your calculator is jailbroken: ${jailbreakLink('jailbreak it now')}, then ${lower}</p>`);
   } else if (main && page !== 'program' && startHelpShown(page, asm, state)) {
@@ -1593,8 +1598,9 @@ function demoFeedback(show, label) {
 // send of the first game with optional parts (one or two parts left out, a
 // Send again that added the rest or only some of it) without a calculator, to
 // look at the Sent message. ?sent=asm paints this card's game sent to an
-// OS 5.2 calculator (no jailbreak, started through Asm(), with its "Game
-// didn't start?" panel; ?sent=refused paints the refusal its Send gives with
+// OS 5.2 calculator with nothing else in RAM (no jailbreak, started through
+// Asm(), with its start help panel, and the planner's RAM line if it gives
+// one); ?sent=refused paints the refusal its Send gives with
 // 700 KB of archive free, worked out by the sender's own planInstall and
 // checkSpace (a game with parts: the smallest install's figures).
 async function demoSent(show, label, file) {
@@ -1604,7 +1610,9 @@ async function demoSent(show, label, file) {
     const entries = collectEntries(await bundle(file, label));
     const main = entries.filter(e => PROGRAMS.includes(e.type)).at(-1);
     if (m[1] === 'asm') {
-      show(sentHtml({ os: '5.2.2.0043', route: 'native', warnings: [] }, main, true, { tools: [] }), 'ok');
+      // A calculator with nothing else in RAM, as the planner sees it.
+      const { warnings } = planInstall(entries, { rows: [], ramFree: CLEAN_RAM, archiveFree: 3e6, archive: 'programs-ram', launchRam: await ramNow() });
+      show(sentHtml({ os: '5.2.2.0043', route: 'native', warnings }, main, true, { tools: [] }), 'ok');
       return;
     }
     const listed = await partsNow();

@@ -456,3 +456,21 @@ test('checkSpace least: names the smallest install and how much to free', () => 
   assert.equal(err.message, `Not enough room on the calculator: even with only the first world, this game needs ${need} KB of archive and there's 100 KB free. Delete about ${need - 100} KB of programs you don't need (2nd, +, 2: Mem Management), then try again.`);
   assert.match((() => { try { checkSpace(plan, { least: true }); } catch (e) { return e.message; } })(), /^Not enough room on the calculator: even its smallest install needs /);
 });
+
+// A game whose measured start figure cannot fit in an empty calculator's RAM
+// on OS 5.2 and earlier needs a newer OS: no advice to free RAM.
+test('below 5.3, a game too big to start in an empty calculator\'s RAM needs a newer OS', () => {
+  const body = new Uint8Array(300);
+  body.set([0xEF, 0x7B]); // an assembly program
+  const prog = makeEntry({ name: 'GAME', type: TYPE.PROTECTED_PROGRAM, body, archived: true });
+  const size = prog.data.length;
+  const big = { GAME: { size, ram: 160000, starts: 158000 } };
+  const early = { rows: [], ramFree: 150000, archiveFree: 3e6, archive: 'programs-ram' };
+  assert.deepEqual(planInstall([prog], { ...early, launchRam: big }).warnings, [{ code: 'NEEDS_NEWER_OS' }]);
+  // The same game on OS 5.3 or later runs from archive.
+  assert.equal(planInstall([prog], { ...early, archive: 'programs', launchRam: big }).warnings.some(w => w.code === 'NEEDS_NEWER_OS'), false);
+  // A figure without `starts` keeps the usual warning.
+  assert.equal(planInstall([prog], { ...early, launchRam: { GAME: { size, ram: 160000 } } }).warnings[0].code, 'LOW_RAM_TO_RUN');
+  // A game that fits beside its own program gets no warning.
+  assert.deepEqual(planInstall([prog], { ...early, launchRam: { GAME: { size, ram: 40000, starts: 38000 } } }).warnings, []);
+});
