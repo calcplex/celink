@@ -749,7 +749,11 @@ export async function sendGame(openLink, files, { onProgress = null, onStep = nu
   }
   const archived = plan.steps.filter(s => s.archived).map(s => s.entry.name);
   const added = missing ? missing.filter(part => !leftOut.includes(part)).map(part => part.label) : [];
-  const r = { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings: plan.warnings, bytes: total, rechecked, verify, added, leftOut: leftOut.map(part => part.label), defrag };
+  // A send that only adds parts plans no program, so whether the game can
+  // start on this OS at all is the whole game's answer.
+  const warnings = missing && planInstall(todo, { rows: [], archive: mode, launchRam }).warnings.some(w => w.code === 'NEEDS_NEWER_OS')
+    ? [{ code: 'NEEDS_NEWER_OS' }] : plan.warnings;
+  const r = { os: calc.os, route: calc.route, asm, sent, replaced, archived, warnings, bytes: total, rechecked, verify, added, leftOut: leftOut.map(part => part.label), defrag };
   if (leftOut.length) {
     const rest = new Set(leftOut.flatMap(part => part.names));
     r.addKB = await roomToAdd(link, todo.filter(e => library(e) || rest.has(e.name)), mode, plan);

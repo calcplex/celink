@@ -562,12 +562,31 @@ async function askJailbreak() {
   return jbPromptChoice(choice);
 }
 
-// `where` finishes the "pick a game" sentence for the page it is on.
-function verdict(c, where) {
+// A game too big to start below OS 5.3 on any calculator (the planner's
+// NEEDS_NEWER_OS): the Sent message, and a game page's line while the
+// calculator holds it.
+const NEEDS_OS_TEXT = 'This game needs OS 5.3 or newer.';
+
+// Whether the game in `file`, which this calculator's listing (`rows`)
+// holds, can never start on it: OS 5.2 and earlier keep the program itself in
+// RAM, and the planner finds too little left beside it even on an empty
+// calculator. Only the build this site serves counts (another copy under the
+// name may be smaller), and a RAM list that did not come gives no answer.
+async function needsNewerOs(os, rows, file, label) {
+  if (!needsAsm(os)) return false;
+  const entries = collectEntries(await bundle(file, label));
+  const served = entries.filter(isAssembly).some(e => rows.some(r => r.name === e.name && r.type === e.type && r.size === e.data.length));
+  return served && planInstall(entries, { rows: [], archive: 'programs-ram', launchRam: await ramNow() }).warnings.some(w => w.code === 'NEEDS_NEWER_OS');
+}
+
+// `where` finishes the "pick a game" sentence for the page it is on; `floor`:
+// the game there can never start on this calculator (needsNewerOs).
+function verdict(c, where, floor = false) {
   const connected = os => `<strong>Calculator connected</strong> (${os})`;
   const os = `OS ${esc(shortOs(c.os))}`;
   if (basic()) return `${connected(os)}. ${where}`;
   if (page === 'program') return programVerdict(c, where, connected, os);
+  if (floor) return `${connected(os)}. ${where} ${NEEDS_OS_TEXT}`;
   switch (jailbreakState(c.route, c.tools)) {
     // No jailbreak on 5.4 and earlier, so no A: say how games start there.
     case 'none': return `${connected(os)}. ${where} ${needsAsm(c.os) ? 'No jailbreak needed: games start through Asm( on this version.' : `No jailbreak needed: games start from the ${keyHelpHtml('ce')} menu.`}`;
@@ -579,8 +598,8 @@ function verdict(c, where) {
 }
 
 const IN_OTHER_TAB = 'Your calculator is connected in another tab. Click Connect to use it here.';
-function statusHtml(where) {
-  if (link && calc) return verdict(calc, where);
+function statusHtml(where, floor = false) {
+  if (link && calc) return verdict(calc, where, floor);
   if (connecting) return 'Connecting to your calculator…';
   if (parked && parkedFor === 'page') return IN_OTHER_TAB;
   if (parked && where.startsWith('Pick')) return 'When you’re done jailbreaking, connect your calculator again.';
@@ -809,7 +828,7 @@ function sentHtml(r, main, asm, c, partial = null) {
   const sent = partial ? '' : '<strong>Sent!</strong> ';
   // Too big to start below OS 5.3 on any calculator.
   if (r.warnings.some(w => w.code === 'NEEDS_NEWER_OS')) {
-    html.push('<p>This game needs OS 5.3 or newer.</p>');
+    html.push(`<p>${NEEDS_OS_TEXT}</p>`);
     return html.join('');
   }
   if (asm && state === 'missing') {
@@ -1295,6 +1314,13 @@ function mountGame() {
   });
   let mode = '';
   const here = presence(file, label, () => paint(), { fetchGame: true });
+  // Whether the game there can never start on this calculator: asked while it
+  // is there, again whenever the listing changes.
+  const floor = presenceTracker({
+    rowsNow: () => (link && calc && deleteOn() ? calc.rows : null),
+    check: rows => needsNewerOs(calc?.os, rows, file, label),
+    repaint: () => paint(),
+  });
   const rate = mountRate(card, { file, label, demo: DEMO_RATE });
   const paint = () => {
     const connected = !!(link && calc);
@@ -1304,7 +1330,7 @@ function mountGame() {
     const gateGame = FIRST && !!DOWNLOAD_FIRST[file];
     const gated = gateGame && !onCalc && !wasDownloaded(file);
     msg.innerHTML = gated ? GATE_TEXT(label) : connected || connecting
-      ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : 'Click Send to calculator to install it.')
+      ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : 'Click Send to calculator to install it.', onCalc && floor())
       : parked && parkedFor === 'page' ? IN_OTHER_TAB : gateGame ? GATE_DONE : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
     const kind = statusKind();
     card.className = 'ce-conn is-leaf' + (kind ? ' ' + kind : outcome === 'bad' ? ' bad' : '');
