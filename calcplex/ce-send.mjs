@@ -29,6 +29,9 @@
 // A game or program on the connected calculator, including one this page just
 // sent, gets "Played it? Rate it:" ("Used it?" on the math page) and five
 // stars under its card.
+// A game too big to ever start on the connected calculator (OS 5.2 and
+// earlier) is never sent: its own page says so on connect, with its Send
+// greyed out and no stars, and a Send anywhere else answers the same.
 // Without WebUSB, or on a phone, the page keeps its download buttons only.
 // Another script on the page (a help panel, say) can follow what is on the
 // connected calculator: see announceContents below.
@@ -563,19 +566,20 @@ async function askJailbreak() {
 }
 
 // A game too big to start below OS 5.3 on any calculator (the planner's
-// NEEDS_NEWER_OS): the Sent message, and a game page's line while the
-// calculator holds it.
+// NEEDS_NEWER_OS): a Send's answer, which sends nothing, and a game page's
+// line on such a calculator.
 const NEEDS_OS_TEXT = 'This game needs OS 5.3 or newer.';
 
-// Whether the game in `file`, which this calculator's listing (`rows`)
-// holds, can never start on it: OS 5.2 and earlier keep the program itself in
-// RAM, and the planner finds too little left beside it even on an empty
-// calculator. Only the build this site serves counts (another copy under the
-// name may be smaller), and a RAM list that did not come gives no answer.
+// Whether the game in `file` can never start on this calculator: OS 5.2 and
+// earlier keep the program itself in RAM, and the planner finds too little
+// left beside it even on an empty calculator. With the listing (`rows`), only
+// when the calculator holds the build this site serves (another copy under
+// the name may be smaller); with none, whether the build a Send would send
+// could ever start there. A RAM list that did not come gives no answer.
 async function needsNewerOs(os, rows, file, label) {
   if (!needsAsm(os)) return false;
   const entries = collectEntries(await bundle(file, label));
-  const served = entries.filter(isAssembly).some(e => rows.some(r => r.name === e.name && r.type === e.type && r.size === e.data.length));
+  const served = !rows || entries.filter(isAssembly).some(e => rows.some(r => r.name === e.name && r.type === e.type && r.size === e.data.length));
   return served && planInstall(entries, { rows: [], archive: 'programs-ram', launchRam: await ramNow() }).warnings.some(w => w.code === 'NEEDS_NEWER_OS');
 }
 
@@ -586,7 +590,7 @@ function verdict(c, where, floor = false) {
   const os = `OS ${esc(shortOs(c.os))}`;
   if (basic()) return `${connected(os)}. ${where}`;
   if (page === 'program') return programVerdict(c, where, connected, os);
-  if (floor) return `${connected(os)}. ${where} ${NEEDS_OS_TEXT}`;
+  if (floor) return `${connected(os)}. ${where ? `${where} ` : ''}${NEEDS_OS_TEXT}`;
   switch (jailbreakState(c.route, c.tools)) {
     // No jailbreak on 5.4 and earlier, so no A: say how games start there.
     case 'none': return `${connected(os)}. ${where} ${needsAsm(c.os) ? 'No jailbreak needed: games start through Asm( on this version.' : `No jailbreak needed: games start from the ${keyHelpHtml('ce')} menu.`}`;
@@ -650,6 +654,13 @@ async function run({ file, label, say, show }) {
     const asm = entries.some(isAssembly);
     const main = entries.filter(e => PROGRAMS.includes(e.type)).at(-1);
     const game = main ? main.name : label.slice(0, 20);
+    // A game that can never start on this calculator is not sent: the click gets the reason.
+    if (await needsNewerOs(c.os, null, file, label)) {
+      track('ce_send_fail', { game, reason: 'needs_newer_os', page });
+      say('');
+      show(`<p>${NEEDS_OS_TEXT}</p>`, 'warn');
+      return;
+    }
     if (asm && !sendAnyway && jailbreakState(c.route, c.tools) === 'missing') {
       say('');
       const choice = await askJailbreak();
@@ -1321,16 +1332,26 @@ function mountGame() {
     check: rows => needsNewerOs(calc?.os, rows, file, label),
     repaint: () => paint(),
   });
+  // Whether this game, as this site serves it, could never start on the
+  // connected calculator: asked once per connect. Its Send then stays greyed out.
+  const never = presenceTracker({
+    rowsNow: () => (link && calc ? calc : null),
+    check: c => needsNewerOs(c.os, null, file, label),
+    repaint: () => paint(),
+  });
   const rate = mountRate(card, { file, label, demo: DEMO_RATE });
   const paint = () => {
     const connected = !!(link && calc);
     const onCalc = connected && here();
-    rate(onCalc);
+    const stuck = onCalc && floor();
+    const refused = connected && !onCalc && never();
+    // No stars for a game the card says can never start here.
+    rate(onCalc && !stuck);
     // Send first, a DOWNLOAD_FIRST game: its download is step one, in Connect's place.
     const gateGame = FIRST && !!DOWNLOAD_FIRST[file];
     const gated = gateGame && !onCalc && !wasDownloaded(file);
     msg.innerHTML = gated ? GATE_TEXT(label) : connected || connecting
-      ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : 'Click Send to calculator to install it.', onCalc && floor())
+      ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : refused ? '' : 'Click Send to calculator to install it.', stuck || refused)
       : parked && parkedFor === 'page' ? IN_OTHER_TAB : gateGame ? GATE_DONE : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
     const kind = statusKind();
     card.className = 'ce-conn is-leaf' + (kind ? ' ' + kind : outcome === 'bad' ? ' bad' : '');
@@ -1350,7 +1371,8 @@ function mountGame() {
         actions.firstElementChild.onclick = go;
       }
     }
-    actions.querySelectorAll('button').forEach(b => { b.disabled = busy || connecting; });
+    // A game that can never start here keeps its Send greyed out; the arrow (the download) works.
+    actions.querySelectorAll('button').forEach(b => { b.disabled = busy || connecting || (refused && !b.classList.contains('ce-split-arrow')); });
     SC.showHint(card, !connected && !gated && outcome !== 'bad');
   };
   listeners.add(paint);
