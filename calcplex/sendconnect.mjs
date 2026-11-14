@@ -67,7 +67,7 @@ const WORDS = {
   },
   quick: {
     hint: ['A popup lists your calc. Click it, then hit Connect.', 'Use the cable that came with your calc. Some cables only charge.'],
-    again: 'Connect again',
+    again: 'Try again',
     winNoDevice: {
       lead: 'Calc not in the list? Get TI Connect CE first.',
       why: 'On Windows, your calc only shows up once TI Connect CE is installed.',
@@ -87,7 +87,7 @@ const WORDS = {
     claimed: {
       lead: 'TI Connect CE (or another tab) is using your calc.',
       leadChromeOS: 'Another tab is using your calc.',
-      next: 'Close it, then connect again.',
+      next: 'Close that, then try again.',
       stuck: 'Still stuck? Unplug your calc and plug it back in.',
     },
     winSecurity: {
@@ -99,7 +99,7 @@ const WORDS = {
       ],
     },
     chromeosBlocked: {
-      lead: 'This Chromebook blocks websites from using USB devices.',
+      lead: "This Chromebook won't let websites use USB.",
       why: "That's often a school setting.",
       file: 'Download it, then send it from a Windows or Mac computer with TI Connect CE.',
       list: what => `Hit Download! on a ${what} below, then send it from a Windows or Mac computer with TI Connect CE.`,
@@ -258,8 +258,8 @@ export function failPanel(err, ctx = {}) {
 /** The hub panel's error, as a block: a fix as it is, other words in the panel's error line. */
 export const errBlock = html => (String(html).startsWith('<div class="ce-fix') ? html : `<p class="msg err">${html}</p>`);
 
-/** The hub panel's button under an error: Connect again under a fix that asks for it. */
-export const panelButton = html => (/^<div class="ce-fix"[^>]* data-again>/.test(String(html)) ? WORDS.plain.again : 'Connect your calculator');
+/** A connect panel's button under an error: the voice's Connect again under a fix that asks for it (the plain voice with no `setup`). */
+export const panelButton = (html, setup) => (/^<div class="ce-fix"[^>]* data-again>/.test(String(html)) ? words(setup).again : 'Connect your calculator');
 
 // ---------------------------------------------------------------- preview
 
