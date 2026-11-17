@@ -7,7 +7,7 @@
 // changed here. Only 5.4.0, only to a calculator older than 5.3.
 import { BOOT_MODE_REFUSAL, parseOSFile, sendOS } from '../celink-os.mjs';
 import { esc, helpHtml, refusal } from './core.mjs';
-import { OS_540_URL, connectAfresh, offersOs540 } from './connect.mjs';
+import { OS_540_URL, connectAfresh, offersOs540, reconnect } from './connect.mjs';
 
 /** The one OS this page sends, and the calculators it sends it to (older than `below`). */
 export const OS540 = Object.freeze({ version: '5.4.0', below: '5.3.0' });
@@ -282,7 +282,9 @@ export function os540Screens(ui) {
       bandsUnder($('.cec-os540'));
       const bytes = pickedOS;
       if (!bytes) throw refusal('NO_FILE', 'Choose the .8eu file first.');
-      if (connect) {
+      // With no calculator known (the one picked here last was waiting for
+      // its OS), every press connects the same way.
+      if (connect || !state.info) {
         ui.say('Pick your calculator in the browser window that opens.');
         try {
           state.info = await connectAfresh(ui.transport, { beforeOpen: ui.claim });
@@ -291,6 +293,17 @@ export function os540Screens(ui) {
           if (!waitingForOS(err)) throw err;
         }
         if (state.info && (!offersOs540(state.info.os) || state.info.family)) return afterConnect();
+      } else if (ui.transport.poisoned) {
+        // A dead link: the device list again, and the OS goes only to the
+        // calculator this install started with (connect again's check). One
+        // waiting for its OS can't say which it is, and takes it, as above.
+        ui.say('Pick your calculator in the browser window that opens.');
+        ui.transport.info ??= state.info;
+        try {
+          await reconnect(ui.transport, { beforeOpen: ui.claim });
+        } catch (err) {
+          if (!waitingForOS(err)) throw err;
+        }
       }
       await send(bytes);
     });
