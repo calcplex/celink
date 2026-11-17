@@ -4,7 +4,7 @@
 // Sending a game to a TI-84 Plus CE: every file of it, every time, libraries
 // first, after a space check, with each variable read back. The pages own the
 // words on screen; this module owns what goes over the cable.
-import { NAMED, NO_CERT_NAME, compatibility, digest, isCE, isEvoDevice, launchesArchived, programRunning, refusal, unnamedCE } from './core.mjs';
+import { NAMED, NO_CERT_NAME, compatibility, digest, familyCE, isCE, isEvoDevice, launchesArchived, programRunning, refusal, unnamedCE } from './core.mjs';
 import { CELink } from '../celink.mjs';
 import { parseFile, TYPE } from '../tifiles.mjs';
 
@@ -130,11 +130,16 @@ export function readyEach(link) {
   };
 }
 
-/** { model, os, boot, route, ramFree, archiveFree, home }, refusing anything but a CE. */
-export async function identify(link) {
+/**
+ * { model, os, boot, route, ramFree, archiveFree, home }, refusing anything
+ * but a CE. With `family` (the jailbreak installer's sends) the rest of the
+ * TI-84 Plus CE family passes too (familyCE).
+ */
+export async function identify(link, { family = false } = {}) {
   const info = await link.info();
   // The USB id too, so this gate matches the installer's (checkCalculator).
-  if (!isCE(info.productName) && !unnamedCE({ ...info, usbProductId: link.device?.productId })) {
+  if (!isCE(info.productName) && !unnamedCE({ ...info, usbProductId: link.device?.productId })
+    && !(family && familyCE(info))) {
     const shown = info.productName !== NO_CERT_NAME && info.productName;
     throw refusal('OTHER_MODEL', `This is a ${shown || 'calculator this page does not know'}. These files are for the TI-84 Plus CE.`, { model: info.productName });
   }
@@ -681,6 +686,7 @@ async function roomToAdd(link, entries, archive, plan) {
  *   base                     with parts: what the required files hold ('the first world'), for a
  *                            refusal when not even they fit, which names their archive (the
  *                            least to free) instead of the whole game's
+ *   family                   the rest of the TI-84 Plus CE family is taken too (identify)
  * Resolves { os, route, asm, sent, replaced, archived, warnings, bytes, rechecked, verify,
  * added, leftOut, addKB, defrag }: `added` the labels of the parts a send that only added parts
  * sent (otherwise []), `leftOut` those of the parts not sent (none: []), and with any,
@@ -691,10 +697,10 @@ async function roomToAdd(link, entries, archive, plan) {
  * calculator refused for space may still be listed, empty, under its name;
  * one this send created is deleted again and named in `emptied`.
  */
-export async function sendGame(openLink, files, { onProgress = null, onStep = null, onBusy = null, verify = 'full', archive = 'file', launchRam = null, parts = [], base = null } = {}) {
+export async function sendGame(openLink, files, { onProgress = null, onStep = null, onBusy = null, verify = 'full', archive = 'file', launchRam = null, parts = [], base = null, family = false } = {}) {
   const todo = collectEntries(files);
   const link = readyEach(openLink);
-  const calc = await identify(link);
+  const calc = await identify(link, { family });
   const asm = todo.some(isAssembly);
   if (asm && (calc.route === 'unsupported' || calc.route === 'unknown')) {
     throw refusal('NO_JAILBREAK', `There's no jailbreak for OS ${calc.os} yet, so this game can't run on it.`);

@@ -290,7 +290,7 @@ export function os540Screens(ui) {
           // A calculator waiting for its OS refuses the normal mode: send to it.
           if (!waitingForOS(err)) throw err;
         }
-        if (state.info && !offersOs540(state.info.os)) return afterConnect();
+        if (state.info && (!offersOs540(state.info.os) || state.info.family)) return afterConnect();
       }
       await send(bytes);
     });

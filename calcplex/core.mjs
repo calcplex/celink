@@ -607,21 +607,45 @@ export function modelLabel(model) {
   return model === NO_CERT_NAME ? 'TI-84 Plus CE' : model;
 }
 
+// The rest of the TI-84 Plus CE family, which arTIfiCE supports with the same
+// files and the same steps: the TI-84 Plus CE-T and the TI-83 Premium CE, by
+// the exact product names they report.
+const FAMILY_NAMES = Object.freeze(['TI-84 Plus CE-T', 'TI-83 Premium CE']);
+
+/** Another calculator of the TI-84 Plus CE family: a name in FAMILY_NAMES. */
+export function familyCE({ productName } = {}) {
+  return FAMILY_NAMES.includes(productName);
+}
+
 /**
- * The installer's model and version gate: { model, os, route }. Stricter
- * than isCE: only the two names a TI-84 Plus CE reports, with or without
- * " USB", since a route is chosen for exactly that model, or a CE with no
- * name (unnamedCE, given `productNumber` and `usbProductId`). `model` stays
- * as the calculator gave it.
+ * The installer's model and version gate: { model, os, route }. A TI-84 Plus
+ * CE is one of the two names it reports, with or without " USB", or a CE with
+ * no name (unnamedCE, given `productNumber` and `usbProductId`). The rest of
+ * its family (familyCE) passes too, with `family: true`: the same route for
+ * the same OS. Anything else is refused. `model` stays as the calculator gave
+ * it.
  */
 export function checkCalculator(model, os, { productNumber, usbProductId } = {}) {
   const named = /^TI-84(?:\+| Plus )CE(?: USB)?$/.test(model);
-  if (!named && !unnamedCE({ productName: model, productNumber, osVersion: os, usbProductId })) {
+  const ce = named || unnamedCE({ productName: model, productNumber, osVersion: os, usbProductId });
+  const family = !ce && familyCE({ productName: model });
+  if (!ce && !family) {
     const text = model === NO_CERT_NAME ? 'Could not read which calculator this is.' : `Detected ${model || 'an unknown model'}.`;
     throw refusal('WRONG_MODEL', `${text} Connect a TI-84 Plus CE.`, { model });
   }
   if (!/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(os)) throw refusal('NO_OS_VERSION', 'Could not read an exact OS version. No files will be sent.');
-  return { model, os, route: compatibility(os) };
+  return { model, os, route: compatibility(os), ...(family ? { family: true } : {}) };
+}
+
+/**
+ * `html` (or plain text) with the key names printed on `model`'s keypad. On a
+ * TI-83 Premium CE, 2nd is labelled 2nde, and apps is reached with 2nde then
+ * résol; no other key is renamed. For any other model `html` comes back as
+ * it is.
+ */
+export function keyNames(html, model) {
+  if (!/^TI-83 Premium CE/.test(model ?? '')) return html;
+  return String(html).replace(/<kbd>apps<\/kbd>/g, '<kbd>2nde</kbd> <kbd>résol</kbd>').replace(/\b2nd\b/g, '2nde');
 }
 
 // arTIfiCE v3 installs through TI's Inequality Graphing app, so the installer
@@ -706,13 +730,24 @@ export function platformName(nav) {
 //                ce_connect_fail other_model or wrong_model: the picked device's USB product id
 //                as four lower-case hex digits, e.g. e003 (notCEParams)
 //   evo_hw       ce_connect_fail other_model or wrong_model: the model the calculator named,
-//                as ce_calc_info sends it, when it is plain letters, digits, spaces and + . -
+//                as ce_calc_info sends it, when it is plain letters, digits, spaces and + . -;
+//                the installer's events once it has read the model (trackWith): that model,
+//                as its ce_calc_info sent it
 
 export const PREVIEW_HOST = typeof location !== 'undefined' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+
+// Parameters a page adds to every event it sends from then on: a function,
+// read at each send. An event's own parameters win over them.
+let pageParams = () => ({});
+export function trackWith(params) {
+  pageParams = params;
+}
 
 /** Send a GA4 event; a localhost preview logs it instead, so test runs are not counted. */
 export function track(event, params) {
   try {
+    const extra = pageParams();
+    if (Object.keys(extra).length) params = { ...extra, ...params };
     if (PREVIEW_HOST) console.info('[not sent: preview]', event, params);
     else if (typeof window.gtag === 'function') window.gtag('event', event, params);
   } catch { /* analytics never breaks the page */ }

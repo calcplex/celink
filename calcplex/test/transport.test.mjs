@@ -127,12 +127,25 @@ test('connect reads a 5.3 calculator as the native route', async () => {
   });
 });
 
-test('connect refuses any model name but the two a TI-84 Plus CE reports', async () => {
-  for (const productName of ['TI-84 Plus CE-T', 'TI-84 Plus CE Python']) {
+test('connect refuses a model name outside the TI-84 Plus CE family', async () => {
+  for (const productName of ['TI-84 Plus', 'TI-84 PlusCE', 'TI-83 Premium CE Edition Python']) {
     const sim = new SimulatedCalculator({ os: OS.v3, productName, invalidParams: [0x0002] });
     await withUsb(picker(sim), async () => {
       await assert.rejects(new CETransport().connect(), { code: 'WRONG_MODEL', message: `Detected ${productName}. Connect a TI-84 Plus CE.` });
     });
+  }
+});
+
+test('connect takes the rest of the TI-84 Plus CE family on the route a TI-84 Plus CE takes', async () => {
+  for (const productName of ['TI-84 Plus CE-T', 'TI-83 Premium CE']) {
+    for (const [os, route] of [['native', 'native'], ['v21', 'v21'], ['v3', 'v3']]) {
+      const sim = new SimulatedCalculator({ os: OS[os], productName, invalidParams: [0x0002] });
+      await withUsb(picker(sim), async () => {
+        const info = await new CETransport().connect();
+        assert.equal(info.route, route, `${productName} ${os}`);
+        assert.equal(info.family, true, `${productName} ${os}`);
+      });
+    }
   }
 });
 

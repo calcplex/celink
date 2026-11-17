@@ -164,8 +164,19 @@ test('checkCalculator wants the name a TI-84 Plus CE reports and an exact OS ver
   assert.deepEqual(checkCalculator('TI-84 Plus CE', '5.8.4.0058'), { model: 'TI-84 Plus CE', os: '5.8.4.0058', route: 'v21' });
   assert.equal(checkCalculator('TI-84+CE', '5.3.0.0037').route, 'native');
   assert.equal(checkCalculator('TI-84 Plus CE USB', '5.8.5.0074').route, 'v3');
-  for (const model of ['TI-84 Plus CE-T', 'TI-84 Plus CE Python', 'TI-84 PlusCE', 'TI-84 Evo']) {
+  for (const model of ['TI-84 Plus CE Python', 'TI-84 PlusCE', 'TI-84 Evo']) {
     assert.throws(() => checkCalculator(model, '5.8.5.0074'), { code: 'WRONG_MODEL', message: `Detected ${model}. Connect a TI-84 Plus CE.` }, model);
+  }
+  // The rest of the family, by those exact names.
+  for (const model of ['TI-84 Plus CE-T', 'TI-83 Premium CE']) {
+    assert.deepEqual(checkCalculator(model, '5.8.4.0058'), { model, os: '5.8.4.0058', route: 'v21', family: true });
+    assert.equal(checkCalculator(model, '5.8.5.0074').route, 'v3');
+    assert.equal(checkCalculator(model, '5.3.0.0037').route, 'native');
+  }
+  // Any other name is refused, whatever its ids say.
+  const ce = { productNumber: 0x13, usbProductId: 0xE008 };
+  for (const model of ['TI-84 Plus', 'TI-82 Advanced Edition Python', 'TI-83 Premium CE Edition Python', 'TI-84 Plus CE Python']) {
+    assert.throws(() => checkCalculator(model, '5.8.5.0074', ce), { code: 'WRONG_MODEL', message: `Detected ${model}. Connect a TI-84 Plus CE.` }, model);
   }
   assert.throws(() => checkCalculator(undefined, '5.8.5'), /unknown model/);
   assert.throws(() => checkCalculator('TI-84 Plus CE', undefined), { code: 'NO_OS_VERSION' });

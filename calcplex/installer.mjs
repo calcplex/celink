@@ -25,9 +25,9 @@ import { os540Screens, waitingForOS } from './os540.mjs';
 import { pickCalculator, sendGame } from './gamesend.mjs';
 import {
   INEQUALZ_URL, LEAVE_SHELL_KEY, OFFICIAL, PREVIEW_HOST, ROUTES, RUNNING_TEXT, TICONNECT_URL, archiveMode, calcParams, compatibility, esc,
-  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, installerReturn, isChromeOS, isWindows, keyHelpHtml, linkDead, modelLabel, mountKeyHelp,
+  fetchOfficial, identifyOfficial, inequalzStatus, installerFailReason, installerReturn, isChromeOS, isWindows, keyHelpHtml, keyNames, linkDead, modelLabel, mountKeyHelp,
   needsAsm, officialFiles, openDetail, parseFlashApp, parseVariable, programRunning, refusal, refusalText, refusedAt, resumable, startHint,
-  stepTracker, tabHandoff, track, trackConnectFail, unknownRefusal, unreadModel, TAB_BUSY_TEXT,
+  stepTracker, tabHandoff, track, trackConnectFail, trackWith, unknownRefusal, unreadModel, TAB_BUSY_TEXT,
 } from './core.mjs';
 import { CELinkError } from '../celink.mjs';
 import { EVO_PRODUCT_ID as EVO_ID } from '../celink.mjs';
@@ -337,7 +337,7 @@ function report(choice) {
   const box = $('#cec-report');
   box.querySelectorAll('[data-choice]').forEach(b => b.classList.toggle('is-picked', b.dataset.choice === choice));
   const fix = $('#cec-report-fix');
-  fix.innerHTML = reportFix(choice);
+  fix.innerHTML = ownKeys(reportFix(choice));
   fix.hidden = false;
   // An answer that names Start over shows it (on Connect it waits for a failure).
   const restart = $('#cec-restart');
@@ -357,7 +357,7 @@ function report(choice) {
 const transport = new CETransport();
 const state = {
   step: 0,          // index into STEPS
-  info: null,       // { model, os, route } read off the calculator
+  info: null,       // { model, os, route, family? } read off the calculator (checkCalculator)
   picked: {},       // file spec name -> { bytes, spec }
   screenFiles: [],  // the file(s) the screen on show is about
   pickedApp: null,  // TI's .8ek, if the person picked one on the Inequalz screen
@@ -372,6 +372,16 @@ const state = {
   screen: '',       // the ce_step name of the screen on show
   answered: {},     // Run screen check: answer -> true, so one page load counts each once
 };
+
+// Once the model is read, every event names it (evo_hw, as ce_calc_info
+// sends it), so each model's way through the install reads on its own.
+trackWith(() => (state.info?.model ? { evo_hw: state.info.model } : {}));
+// The calculator's own key names in the words a screen shows (core's
+// keyNames: a TI-83 Premium CE's 2nde and résol); unchanged for any other.
+const ownKeys = text => keyNames(text, state.info?.model);
+// The update to OS 5.4.0 is TI's file for the TI-84 Plus CE: offered on OS
+// 5.2 and earlier, and never to another model of its family.
+const offersUpdate = () => offersOs540(state.info.os) && !state.info.family;
 
 function root() { return $('#cec'); }
 
@@ -419,7 +429,10 @@ function trackStep(screen) {
 let keyHelp = null;
 
 // A key (or the prgm key help) and the punctuation after it stay on one line.
-const keepKeyPunctuation = html => html.replace(/(?:<kbd>[^<]*<\/kbd>|<button type="button" class="cec-keyhelp"[^>]*>(?:[^<]|<(?!\/button>))*<\/button>)[.,:;)]+/g, m => `<span class="cec-nobr">${m}</span>`);
+// The keys take the calculator's own names first (ownKeys); a TI-83 Premium
+// CE's apps is two keys, 2nde résol, kept on one line as a pair (no other
+// model's words ever hold 2nde, so theirs come out as before).
+const keepKeyPunctuation = html => ownKeys(html).replace(/(?:<kbd>2nde<\/kbd> <kbd>résol<\/kbd>[.,:;)]*|(?:<kbd>[^<]*<\/kbd>|<button type="button" class="cec-keyhelp"[^>]*>(?:[^<]|<(?!\/button>))*<\/button>)[.,:;)]+)/g, m => `<span class="cec-nobr">${m}</span>`);
 
 // Smooth, unless the reader's system asks for less motion: then it jumps.
 const scrollBehavior = () => (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth');
@@ -525,7 +538,7 @@ function markPicker(err) {
   if (err && typeof err === 'object' && PICKER_CODES.includes(err.code)) err.picker = true;
   return err;
 }
-function say(text) { const el = $('#cec-status'); if (el) el.textContent = text || ''; }
+function say(text) { const el = $('#cec-status'); if (el) el.textContent = ownKeys(text || ''); }
 function fail(err) {
   const el = $('#cec-error');
   if (!el) return;
@@ -799,13 +812,13 @@ function viewNative() {
     <p class="cec-sub">Games already run on OS ${esc(state.info.os)}.</p>
     ${sendActions()}
     <div id="cec-howto"><p>${lead}</p>${walk(early ? 'ce-jb-native-asm' : 'ce-jb-native-game')}</div>
-    ${offersOs540(state.info.os) ? os540Box() : ''}
+    ${offersUpdate() ? os540Box() : ''}
     ${gamesActions({ secondary: true })}
   `, 1, 'native');
   wireSends();
   const tiplanet = $('#cec-os540-get');
   if (tiplanet) tiplanet.addEventListener('click', () => trackStep('native_os540'));
-  if (offersOs540(state.info.os)) os540().wire();
+  if (offersUpdate()) os540().wire();
 }
 
 // Sending OS 5.4.0: the screens are os540.mjs's, made on first use.
@@ -1150,8 +1163,8 @@ function wireCheck(kind) {
       if (CHECKS[kind].link) b.setAttribute('aria-expanded', 'true');
       else box.querySelectorAll('[data-answer]').forEach(x => x.classList.toggle('is-picked', x === b));
       const fix = $('#cec-check-fix');
-      fix.innerHTML = answer === 'yes' ? `<p>${CHECKS[kind].yes()}</p>`
-        : `<ul>${CHECKS[kind].no().map(line => `<li>${line}</li>`).join('')}</ul>`;
+      fix.innerHTML = ownKeys(answer === 'yes' ? `<p>${CHECKS[kind].yes()}</p>`
+        : `<ul>${CHECKS[kind].no().map(line => `<li>${line}</li>`).join('')}</ul>`);
       fix.hidden = false;
       const key = `${kind}_${answer}`;
       if (state.answered[key]) return;
@@ -1291,7 +1304,9 @@ async function sendGameTo(game) {
     if (!response.ok) throw refusal('FETCH', `${game.label} could not be downloaded from this site. Try again in a moment.`);
     const bytes = new Uint8Array(await response.arrayBuffer());
     say(`Sending ${game.label}. Leave the cable alone until it finishes.`);
+    // family: a model checkCalculator took (the TI-84 Plus CE's family) takes the game too.
     const r = await sendGame(link, [bytes], {
+      family: true,
       archive: archiveMode('installer', game.name),
       onProgress: (done, total) => { if (total) say(`Sending ${game.label}. Leave the cable alone until it finishes. ${Math.min(99, Math.round(done / total * 100))}%`); },
     });
@@ -1741,12 +1756,12 @@ function appNative() {
     title: ROUTES.native.heading,
     lead: `Games already run on OS ${esc(state.info.os)}.`,
     actions: `<div class="cec-actions" data-status>${appBtn(GAME.id, `Send ${GAME.label}`, { big: true })}</div>`,
-    more: offersOs540(state.info.os) ? os540().link() : '',
+    more: offersUpdate() ? os540().link() : '',
   }), 1, 'native');
   wireSends();
   const tiplanet = $('#cec-os540-get');
   if (tiplanet) tiplanet.addEventListener('click', () => trackStep('native_os540'));
-  if (offersOs540(state.info.os)) os540().wireLink();
+  if (offersUpdate()) os540().wireLink();
 }
 
 // Connected again after this page sent OS 5.4.0: the update is the news, then
@@ -2399,7 +2414,9 @@ function installPreview() {
     const screen = PREVIEW_SCREENS[name];
     if (!screen) return Object.keys(PREVIEW_SCREENS);
     const [os, view] = screen;
-    state.info = { model: 'TI-84 Plus CE', os, route: compatibility(os) };
+    // &model=<name>: another model of the family, as checkCalculator takes it.
+    const model = new URLSearchParams(location.search).get('model') || 'TI-84 Plus CE';
+    state.info = { model, os, route: compatibility(os), ...(model === 'TI-84 Plus CE' ? {} : { family: true }) };
     state.picked = {};
     transport.info = state.info;
     transport.poisoned = false;

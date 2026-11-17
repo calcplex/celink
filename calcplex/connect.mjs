@@ -44,9 +44,11 @@ export async function connectAfresh(transport, { beforeOpen } = {}) {
 /**
  * Connect again part way through an install, after an unplug or another tab
  * took the calculator. The device list opens as on the Connect screen, and the
- * calculator must be the one the install started on: same route, same OS.
- * Anything else, or a failed connect, leaves the transport as it was (dead), so
- * the next press of a send button asks for this again rather than sending.
+ * calculator must be the one the install started on: same route, same OS, and
+ * the same answer to whether it is another model of the TI-84 Plus CE family
+ * (checkCalculator's `family`). Anything else, or a failed connect, leaves the
+ * transport as it was (dead), so the next press of a send button asks for this
+ * again rather than sending.
  */
 export async function reconnect(transport, { beforeOpen } = {}) {
   const before = transport.info;
@@ -60,7 +62,7 @@ export async function reconnect(transport, { beforeOpen } = {}) {
     transport.poisoned = true;
     throw err;
   }
-  if (info.route !== before.route || info.os !== before.os) {
+  if (info.route !== before.route || info.os !== before.os || !!info.family !== !!before.family) {
     await transport.link?.close().catch(() => {});
     transport.info = before;
     transport.poisoned = true;
