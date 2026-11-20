@@ -583,6 +583,24 @@ async function needsNewerOs(os, rows, file, label) {
   return served && planInstall(entries, { rows: [], archive: 'programs-ram', launchRam: await ramNow() }).warnings.some(w => w.code === 'NEEDS_NEWER_OS');
 }
 
+// toString( (EF 97) came with OS 5.2: a TI-Basic program that uses it stops
+// with a VERSION error on 5.1 and earlier, so a Send there sends nothing.
+const NEEDS_OS_52_TEXT = 'This program needs OS 5.2 or newer.';
+const TWO_BYTE = [0x5C, 0x5D, 0x5E, 0x60, 0x61, 0x62, 0x63, 0x7E, 0xAA, 0xBB, 0xEF];
+
+function usesToString(d) {
+  for (let i = 2; i < d.length; i++) {
+    if (d[i] === 0xEF && d[i + 1] === 0x97) return true;
+    if (TWO_BYTE.includes(d[i])) i++;
+  }
+  return false;
+}
+
+function needsOs52(os, entries) {
+  const [major, minor] = String(os).split('.').map(Number);
+  return major === 5 && minor < 2 && entries.some(e => PROGRAMS.includes(e.type) && !isAssembly(e) && usesToString(e.data));
+}
+
 // `where` finishes the "pick a game" sentence for the page it is on; `floor`:
 // the game there can never start on this calculator (needsNewerOs).
 function verdict(c, where, floor = false) {
@@ -654,11 +672,12 @@ async function run({ file, label, say, show }) {
     const asm = entries.some(isAssembly);
     const main = entries.filter(e => PROGRAMS.includes(e.type)).at(-1);
     const game = main ? main.name : label.slice(0, 20);
-    // A game that can never start on this calculator is not sent: the click gets the reason.
-    if (await needsNewerOs(c.os, null, file, label)) {
+    // A game or program that can never start on this calculator is not sent: the click gets the reason.
+    const floor = await needsNewerOs(c.os, null, file, label) ? NEEDS_OS_TEXT : needsOs52(c.os, entries) ? NEEDS_OS_52_TEXT : '';
+    if (floor) {
       track('ce_send_fail', { game, reason: 'needs_newer_os', page });
       say('');
-      show(`<p>${NEEDS_OS_TEXT}</p>`, 'warn');
+      show(`<p>${floor}</p>`, 'warn');
       return;
     }
     if (asm && !sendAnyway && jailbreakState(c.route, c.tools) === 'missing') {
