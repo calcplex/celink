@@ -43,14 +43,15 @@ import {
   unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete, CLEAN_RAM,
 } from './gamesend.mjs';
 import {
-  DELETE_REASONS, FEEDBACK_FORM, FEEDBACK_MAX, FIND_HELP_OPEN, PREVIEW_HOST, RATE_ASK_AT, RATE_STARS, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
+  DELETE_REASONS, FIND_HELP_OPEN, PREVIEW_HOST, RATE_ASK_AT, RATE_STARS, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
   jbPromptChoice, keyHelpHtml, mountKeyHelp, outOfSpace, presenceTracker, refusedAt, isChromeOS, isWindows, linkDead, pageErrorText, refusal, spaceListChange,
-  feedbackText, sendFeedback, startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
-  rateParams, ratedNote, ratedStars, rememberRating, rememberRatingNote, rememberSend, sentAgo, evoAddress, evoHtml, evoText, isEvoDevice,
+  startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
+  rateParams, ratedNote, ratedStars, rememberRating, rememberSend, sentAgo, evoAddress, evoHtml, evoText, isEvoDevice,
   openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, baseOf, needsAsm, sendOutcome, stallLog, stallText, stallDetail, modal,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 import * as SC from './sendconnect.mjs';
+import { feedbackBox } from './feedback-box.mjs';
 
 // The script tag can set the page up for markup other than this site's own:
 // data-ce-page (hub, game, math or program, instead of reading it from the path),
@@ -132,9 +133,17 @@ const DOWNLOAD_FIRST = {
 // Download links painted here keep the page's vignette opt-out.
 const downloadLinkAttrs = () =>
   (document.querySelector('a[href^="/downloads/ce/"][data-google-vignette="false"]') ? ' data-google-vignette="false"' : '');
-// Send first: under a failed connect or send, the file (not for a TI-84 Evo, sent to its own page).
+// The foot of a failed connect or send. Send first: the file (not for a
+// TI-84 Evo, sent to its own page). Then, with data-ce-feedback on the tag,
+// "Tell us what happened" (tellHtml).
 const failDownload = (file, err) => (FIRST && failReason(err) !== 'evo'
-  ? `<p class="ce-fail-dl"><a href="${esc(encodeURI(file))}"${downloadLinkAttrs()}>Download the file instead</a></p>` : '');
+  ? `<p class="ce-fail-dl"><a href="${esc(encodeURI(file))}"${downloadLinkAttrs()}>Download the file instead</a></p>` : '') + tellHtml(err, file);
+// The feedback link (feedback-box.mjs failLinkHtml), tagged with the reason and
+// whether the connect or the send failed (connectFails), named by the file.
+const TELL = SETUP.ceFeedback != null;
+const tellHtml = (err, file = '') => (TELL ? failLinkHtml(file.split('/').pop().replace(/\.(8xg|8xp|zip)$/i, ''), {
+  what: connectFails.has(err) ? 'connect' : 'send', reason: failReason(err), os: calc?.os ?? '', route: calc?.route ?? '',
+}) : '');
 const decodedHref = a => {
   try { return decodeURI(a.getAttribute('href')); } catch { return a.getAttribute('href'); }
 };
@@ -347,6 +356,10 @@ const wordsPage = () => (page === 'program' ? 'math' : page);
 const basic = () => page === 'math' || (page === 'program' && !ASM);
 let link = null, calc = null;
 let busy = false, connecting = false, present = false, sendAnyway = false;
+// The errors of connects that failed (a send's Connect too), and the last one
+// a click made: the hub panel's feedback link names it.
+const connectFails = new WeakSet();
+let lastConnectFail = null;
 // The installer on another site opens in a new tab, and this tab's open link
 // would keep the calculator from it. A click on it lets the calculator go and
 // parks: no connecting on our own until the student clicks Connect again.
@@ -426,6 +439,8 @@ async function connect(say, { quiet = false } = {}) {
     if (l) await l.close().catch(() => {});
     calc = null;
     stalls.note(err, { connecting: true });
+    if (err && typeof err === 'object') connectFails.add(err);
+    if (!quiet) lastConnectFail = err;
     // The picked device, when there was one: a calculator that is not a CE
     // reports its USB product id.
     if (!quiet) trackConnectFail(err, { page, ...SC.noteFail(err, { cros: CROS }) }, l?.device);
@@ -972,63 +987,16 @@ function wireWhy(box, { game, label, os, route, lastReason }) {
   });
 }
 
-// The feedback box: one text field into the feedback form, under "Why did
-// you delete it?" after the two answers that leave a question open. What
-// the page knows (the game, the answer, the OS) rides in front of the
-// words; one listener (watchFeedback) sends every box on the page. A box
-// with a post in flight is marked data-busy, and typing in it does not
-// re-enable Send. A preview (PREVIEW_HOST) posts nothing: the row goes to the
-// console and the box thanks as if it went.
+// The feedback box (feedback-box.mjs) under "Why did you delete it?" after
+// the two answers that leave a question open, and under a low star vote.
+// One listener (watchFeedback) sends every box on the page.
 const FEEDBACK_ASK = { didnt_work: "What didn't work?", didnt_like: 'What could be improved?' };
 // ce_feedback's choice, from the answer's words the box keeps.
 const FEEDBACK_ASK_IDS = Object.fromEntries(DELETE_REASONS.map(([id, text]) => [text, id]));
-let feedbackBoxes = 0;
-// The stars' box: `note` replaces "deleted: <why>" in the tag, `choice`
-// ce_feedback's choice, `closable` adds an X, `rateKey` keeps the words sent
-// for that vote and `text` starts the box with the words sent last time.
-function feedbackHtml(label, { ask, why = '', os = '', route = '', note = '', choice = '', closable = false, rateKey = '', text = '' }) {
-  const id = `ce-fb-${++feedbackBoxes}`;
-  return `<div class="ce-fb" data-game="${esc(label)}" data-why="${esc(why)}" data-os="${esc(os)}" data-route="${esc(route)}" data-note="${esc(note)}" data-choice="${esc(choice)}" data-rate-key="${esc(rateKey)}">`
-    + (closable ? '<button type="button" class="ce-fb-close" aria-label="Close">×</button>' : '')
-    + `<label for="${id}">${esc(ask)}</label>`
-    + `<textarea id="${id}" rows="3" maxlength="${FEEDBACK_MAX}">${esc(text)}</textarea>`
-    + `<p class="ce-fb-row"><button type="button" class="ce-fb-send"${text.trim() ? '' : ' disabled'}>Send</button></p></div>`;
-}
-
-// The tag in front of the words, from the box's own data.
-function feedbackParts(fb) {
-  const d = fb.dataset;
-  return ['CE', d.game, d.note || `deleted: ${d.why}`, d.os && `OS ${shortOs(d.os)}`, d.route, location.pathname, PREVIEW_HOST ? 'PREVIEW' : ''];
-}
-
-function watchFeedback(root) {
-  root.addEventListener('input', e => {
-    const fb = e.target.closest?.('.ce-fb');
-    if (fb) fb.querySelector('.ce-fb-send').disabled = fb.hasAttribute('data-busy') || !e.target.value.trim();
-  });
-  root.addEventListener('click', async e => {
-    const go = e.target.closest?.('.ce-fb-send');
-    if (!go) return;
-    const fb = go.closest('.ce-fb');
-    const text = fb.querySelector('textarea').value.trim();
-    if (!text || fb.hasAttribute('data-busy')) return;
-    fb.setAttribute('data-busy', '1');
-    go.disabled = true;
-    fb.querySelector('.ce-fb-err')?.remove();
-    try {
-      if (PREVIEW_HOST) console.info('[not sent: preview]', 'feedback', feedbackText(text, feedbackParts(fb)));
-      else await sendFeedback(text, feedbackParts(fb));
-      fb.removeAttribute('data-busy');
-      if (fb.dataset.rateKey) rememberRatingNote(fb.dataset.rateKey, text);
-      fb.innerHTML = '<p class="ce-fb-done">Thank you! We read every response and will do our best to improve.</p>';
-      track('ce_feedback', { game: fb.dataset.game.slice(0, 40), page, choice: fb.dataset.choice || FEEDBACK_ASK_IDS[fb.dataset.why] || 'other' });
-    } catch {
-      fb.removeAttribute('data-busy');
-      go.disabled = false;
-      go.closest('.ce-fb-row').insertAdjacentHTML('afterend', `<p class="ce-fb-err">That didn't send. Try again, or <a href="${FEEDBACK_FORM}/viewform" target="_blank" rel="noopener">open the form</a>.</p>`);
-    }
-  });
-}
+const { html: feedbackHtml, watch: watchFeedback, failLinkHtml } = feedbackBox({
+  prefix: 'CE',
+  track: fb => track('ce_feedback', { game: fb.dataset.game.slice(0, 40), page, choice: fb.dataset.choice || FEEDBACK_ASK_IDS[fb.dataset.why] || 'other' }),
+});
 
 // Under a send refused for space: this site's games on the calculator that
 // refused, in the memory that ran out (the build's games list against the
@@ -1550,10 +1518,16 @@ function mountPanel(before, where) {
   if (!built) before.before(panel);
   // HTML, from errorHtml.
   let panelError = '';
+  // The feedback link under a failed connect, one element per failure, put
+  // back after each repaint so a box opened from it keeps what was typed,
+  // and the focus it had (a replugged cable repaints the panel, once or twice).
+  let tell = null, tellFor = null, typing = null;
   listeners.add(() => {
+    if (tell?.contains(document.activeElement)) typing = document.activeElement;
     const kind = statusKind();
     panel.className = 'ce-conn' + (kind ? ' ' + kind : panelError ? ' bad' : '');
     if ((link && calc) || connecting) {
+      if (link && calc) typing = null;
       panel.innerHTML = `<p class="msg">${statusHtml(where)}</p>`;
       return;
     }
@@ -1566,6 +1540,16 @@ function mountPanel(before, where) {
       panelError = '';
       connectFromClick(t => { button.textContent = t; button.disabled = true; }, err => { panelError = fixHtml(err, 'panel') ?? errorHtml(err); }, { repaint: false });
     };
+    if (!panelError || !lastConnectFail) return;
+    if (tellFor !== lastConnectFail) {
+      tellFor = lastConnectFail;
+      tell = document.createElement('div');
+      tell.innerHTML = tellHtml(lastConnectFail);
+    }
+    panel.append(tell);
+    // Only when nothing else took the focus meanwhile.
+    if (typing && tell.contains(typing) && document.activeElement === document.body) typing.focus({ preventScroll: true });
+    typing = null;
   });
 }
 

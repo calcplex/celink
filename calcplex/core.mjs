@@ -1239,10 +1239,10 @@ export function feedbackText(text, parts) {
   return `[${tag}] ${String(text).trim().slice(0, FEEDBACK_MAX)}`;
 }
 
-/** Post one answer. Rejects only when the request never left (offline, blocked). */
-export async function sendFeedback(text, parts, post = globalThis.fetch) {
+/** Post one answer to `form`. Rejects only when the request never left (offline, blocked). */
+export async function sendFeedback(text, parts, post = globalThis.fetch, form = FEEDBACK_FORM) {
   const body = new URLSearchParams({ [FEEDBACK_FIELD]: feedbackText(text, parts) });
-  await post(`${FEEDBACK_FORM}/formResponse`, { method: 'POST', mode: 'no-cors', body });
+  await post(`${form}/formResponse`, { method: 'POST', mode: 'no-cors', body });
 }
 
 /**
