@@ -1129,13 +1129,16 @@ const wholeStars = n => Number.isInteger(n) && n >= 1 && n <= RATE_STARS;
  * ce_rate's parameters, or null for anything but a whole number of stars from
  * 1 to 5. `from`, the vote it replaces, makes the choice a change ('4to2'),
  * which counts as one vote moved from 4 to 2; the same stars again is null.
+ * `os`, the connected calculator's OS as it reads it, goes out as evo_os like
+ * the other events'; no calculator connected sends no evo_os.
  */
-export function rateParams({ game, page, stars, from = 0, since = null }) {
+export function rateParams({ game, page, stars, from = 0, since = null, os = '' }) {
   if (!wholeStars(stars) || !game) return null;
   const tag = sentTag(since);
-  if (!from) return { game, page, choice: String(stars) + tag };
+  const calcOs = typeof os === 'string' && os ? { evo_os: os } : {};
+  if (!from) return { game, page, choice: String(stars) + tag, ...calcOs };
   if (!wholeStars(from) || from === stars) return null;
-  return { game, page, choice: `${from}to${stars}${tag}` };
+  return { game, page, choice: `${from}to${stars}${tag}`, ...calcOs };
 }
 
 // When this browser last sent each program fresh (it was not on the

@@ -1224,15 +1224,16 @@ function mountRate(after, { file, label, demo = false }) {
     fill();
     done.textContent = from ? 'Updated. Thanks for rating it!' : 'Thanks for rating it!';
     const since = sentAgo(key);
+    // The calculator connected at the click, before the name lookup can wait.
+    const { os = '', route = '' } = calc || {};
     const note = `rated ${n} of ${RATE_STARS}` + (from ? `, was ${from}` : '') + (since === null ? '' : `, ${since} min after sending`);
     const fb = row.querySelector('.ce-fb');
     if (fb?.querySelector('textarea')) fb.dataset.note = note;
     else if (n <= RATE_ASK_AT) {
       fb?.remove();
-      const { os = '', route = '' } = calc || {};
       row.insertAdjacentHTML('beforeend', feedbackHtml(label, { ask: 'What could be improved?', os, route, note, choice: 'rated', closable: true, rateKey: key, text: ratedNote(key) }));
     }
-    const params = rateParams({ game: await gameName(file, label).catch(() => label.slice(0, 20)), page, stars: n, from, since });
+    const params = rateParams({ game: await gameName(file, label).catch(() => label.slice(0, 20)), page, stars: n, from, since, os });
     if (params) track('ce_rate', params);
   });
   return onCalc => {
