@@ -540,6 +540,25 @@ export function planInstall(entries, { rows, ramFree = null, archiveFree = null,
   return { steps, space, warnings };
 }
 
+// The first OS that runs a program from archive (OS 5.2 and earlier copy it
+// to RAM beside itself), so the floor of a game that cannot start that way.
+export const ARCHIVE_RUN_OS = '5.3';
+
+/**
+ * The lowest OS a game (`entries`) can start on, '' for none: '5.3' when an
+ * empty calculator on OS 5.2 or earlier leaves too little RAM beside it
+ * (planInstall's NEEDS_NEWER_OS), else the `os` its RAM list row names (the
+ * lowest version it was seen to run on). Send refuses below it, and the
+ * game's card and page say so (osFloorText), from this one function.
+ */
+export function osFloor(entries, launchRam = null) {
+  if (planInstall(entries, { rows: [], archive: 'programs-ram', launchRam }).warnings.some(w => w.code === 'NEEDS_NEWER_OS')) return ARCHIVE_RUN_OS;
+  const row = entries.filter(isAssembly).map(e => launchRam && launchRam[e.name]).find(m => m && /^\d+\.\d+\.\d+$/.test(m.os || ''));
+  return row ? row.os : '';
+}
+
+export const osFloorText = floor => `This game needs OS ${floor} or newer.`;
+
 /**
  * Refuse a plan that does not fit, naming how much to free. `what` names what
  * was being sent. `least`: the plan is a game's smallest install (its required

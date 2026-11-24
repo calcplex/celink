@@ -40,7 +40,7 @@
 // this would not mount, <html> is ce-nosend and the panel shows a one-line note.
 import {
   PROGRAMS, sendGame, collectEntries, checkSpace, planInstall, deleteGame, freeRamAgain, isAssembly, inspect, jailbreakState, shellLabel, listedOnCalculator, planDelete, readyEach, spaceGames,
-  unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete, CLEAN_RAM,
+  unpackZip, pickCalculator, keepOwned, ownedHere, ownedAfterSend, ownedAfterFailedSend, ownedAfterDelete, CLEAN_RAM, ARCHIVE_RUN_OS, osFloor, osFloorText,
 } from './gamesend.mjs';
 import {
   DELETE_REASONS, FIND_HELP_OPEN, PREVIEW_HOST, RATE_ASK_AT, RATE_STARS, SEND_AGAIN, TICONNECT_URL, archiveMode, asksSendAgain, calcParams, deleteParams, deleteReasonReporter, downloadParams, esc, failReason,
@@ -583,7 +583,7 @@ async function askJailbreak() {
 // A game too big to start below OS 5.3 on any calculator (the planner's
 // NEEDS_NEWER_OS): a Send's answer, which sends nothing, and a game page's
 // line on such a calculator.
-const NEEDS_OS_TEXT = 'This game needs OS 5.3 or newer.';
+const NEEDS_OS_TEXT = osFloorText(ARCHIVE_RUN_OS);
 
 // Whether the game in `file` can never start on this calculator: OS 5.2 and
 // earlier keep the program itself in RAM, and the planner finds too little
@@ -592,19 +592,18 @@ const NEEDS_OS_TEXT = 'This game needs OS 5.3 or newer.';
 // the name may be smaller); with none, whether the build a Send would send
 // could ever start there. A RAM list that did not come gives no answer.
 // A game whose RAM list row names an `os` (the lowest version it was seen to
-// run on, 5.3 or older) is refused below it the same way, naming that version.
+// run on, 5.3 or older) is refused below it the same way, naming that version
+// (gamesend's osFloor; the build writes the same line on its card and page).
 // Returns the line to show, or '' when the game can start here.
 async function needsNewerOs(os, rows, file, label) {
   if (!needsAsm(os)) return '';
   const entries = collectEntries(await bundle(file, label));
   const served = !rows || entries.filter(isAssembly).some(e => rows.some(r => r.name === e.name && r.type === e.type && r.size === e.data.length));
   if (!served) return '';
-  const launchRam = await ramNow();
-  const floor = entries.filter(isAssembly).map(e => launchRam?.[e.name]?.os).find(v => /^\d+\.\d+\.\d+$/.test(v ?? ''));
+  const floor = osFloor(entries, await ramNow());
   const have = String(os).split('.').map(Number), need = floor ? floor.split('.').map(Number) : [];
   const below = need.length && [0, 1, 2].reduce((b, i) => (b !== null ? b : have[i] === need[i] ? null : have[i] < need[i]), null);
-  if (below) return `This game needs OS ${floor} or newer.`;
-  return planInstall(entries, { rows: [], archive: 'programs-ram', launchRam }).warnings.some(w => w.code === 'NEEDS_NEWER_OS') ? NEEDS_OS_TEXT : '';
+  return below ? osFloorText(floor) : '';
 }
 
 // toString( (EF 97) came with OS 5.2: a TI-Basic program that uses it stops
