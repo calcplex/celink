@@ -591,11 +591,20 @@ const NEEDS_OS_TEXT = 'This game needs OS 5.3 or newer.';
 // when the calculator holds the build this site serves (another copy under
 // the name may be smaller); with none, whether the build a Send would send
 // could ever start there. A RAM list that did not come gives no answer.
+// A game whose RAM list row names an `os` (the lowest version it was seen to
+// run on, 5.3 or older) is refused below it the same way, naming that version.
+// Returns the line to show, or '' when the game can start here.
 async function needsNewerOs(os, rows, file, label) {
-  if (!needsAsm(os)) return false;
+  if (!needsAsm(os)) return '';
   const entries = collectEntries(await bundle(file, label));
   const served = !rows || entries.filter(isAssembly).some(e => rows.some(r => r.name === e.name && r.type === e.type && r.size === e.data.length));
-  return served && planInstall(entries, { rows: [], archive: 'programs-ram', launchRam: await ramNow() }).warnings.some(w => w.code === 'NEEDS_NEWER_OS');
+  if (!served) return '';
+  const launchRam = await ramNow();
+  const floor = entries.filter(isAssembly).map(e => launchRam?.[e.name]?.os).find(v => /^\d+\.\d+\.\d+$/.test(v ?? ''));
+  const have = String(os).split('.').map(Number), need = floor ? floor.split('.').map(Number) : [];
+  const below = need.length && [0, 1, 2].reduce((b, i) => (b !== null ? b : have[i] === need[i] ? null : have[i] < need[i]), null);
+  if (below) return `This game needs OS ${floor} or newer.`;
+  return planInstall(entries, { rows: [], archive: 'programs-ram', launchRam }).warnings.some(w => w.code === 'NEEDS_NEWER_OS') ? NEEDS_OS_TEXT : '';
 }
 
 // toString( (EF 97) came with OS 5.2: a TI-Basic program that uses it stops
@@ -617,13 +626,14 @@ function needsOs52(os, entries) {
 }
 
 // `where` finishes the "pick a game" sentence for the page it is on; `floor`:
-// the game there can never start on this calculator (needsNewerOs).
+// the game there can never start on this calculator (needsNewerOs: its line,
+// or true for the OS 5.3 one).
 function verdict(c, where, floor = false) {
   const connected = os => `<strong>Calculator connected</strong> (${os})`;
   const os = `OS ${esc(shortOs(c.os))}`;
   if (basic()) return `${connected(os)}. ${where}`;
   if (page === 'program') return programVerdict(c, where, connected, os);
-  if (floor) return `${connected(os)}. ${where ? `${where} ` : ''}${NEEDS_OS_TEXT}`;
+  if (floor) return `${connected(os)}. ${where ? `${where} ` : ''}${floor === true ? NEEDS_OS_TEXT : floor}`;
   switch (jailbreakState(c.route, c.tools)) {
     // No jailbreak on 5.4 and earlier, so no A: say how games start there.
     case 'none': return `${connected(os)}. ${where} ${needsAsm(c.os) ? 'No jailbreak needed: games start through Asm( on this version.' : `No jailbreak needed: games start from the ${keyHelpHtml('ce')} menu.`}`;
@@ -688,7 +698,7 @@ async function run({ file, label, say, show }) {
     const main = entries.filter(e => PROGRAMS.includes(e.type)).at(-1);
     const game = main ? main.name : label.slice(0, 20);
     // A game or program that can never start on this calculator is not sent: the click gets the reason.
-    const floor = await needsNewerOs(c.os, null, file, label) ? NEEDS_OS_TEXT : needsOs52(c.os, entries) ? NEEDS_OS_52_TEXT : '';
+    const floor = await needsNewerOs(c.os, null, file, label) || (needsOs52(c.os, entries) ? NEEDS_OS_52_TEXT : '');
     if (floor) {
       track('ce_send_fail', { game, reason: 'needs_newer_os', page });
       say('');
@@ -1315,16 +1325,19 @@ function mountGame() {
   const here = presence(file, label, () => paint(), { fetchGame: true });
   // Whether the game there can never start on this calculator: asked while it
   // is there, again whenever the listing changes.
+  // The line such a game gets (needsNewerOs's own words) is kept for paint.
+  let floorText = '';
+  const keep = text => (text && (floorText = text), text);
   const floor = presenceTracker({
     rowsNow: () => (link && calc && deleteOn() ? calc.rows : null),
-    check: rows => needsNewerOs(calc?.os, rows, file, label),
+    check: rows => needsNewerOs(calc?.os, rows, file, label).then(keep),
     repaint: () => paint(),
   });
   // Whether this game, as this site serves it, could never start on the
   // connected calculator: asked once per connect. Its Send then stays greyed out.
   const never = presenceTracker({
     rowsNow: () => (link && calc ? calc : null),
-    check: c => needsNewerOs(c.os, null, file, label),
+    check: c => needsNewerOs(c.os, null, file, label).then(keep),
     repaint: () => paint(),
   });
   const rate = mountRate(card, { file, label, demo: DEMO_RATE });
@@ -1339,7 +1352,7 @@ function mountGame() {
     const gateGame = FIRST && !!DOWNLOAD_FIRST[file];
     const gated = gateGame && !onCalc && !wasDownloaded(file);
     msg.innerHTML = gated ? GATE_TEXT(label) : connected || connecting
-      ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : refused ? '' : 'Click Send to calculator to install it.', stuck || refused)
+      ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : refused ? '' : 'Click Send to calculator to install it.', (stuck || refused) && (floorText || true))
       : parked && parkedFor === 'page' ? IN_OTHER_TAB : gateGame ? GATE_DONE : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
     const kind = statusKind();
     card.className = 'ce-conn is-leaf' + (kind ? ' ' + kind : outcome === 'bad' ? ' bad' : '');
