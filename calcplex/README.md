@@ -9,6 +9,7 @@ library, so it is published here.
 | `core.mjs` | Routing by OS version, strict checks on variable and Flash app files, SHA-256 pins for the arTIfiCE release files, refusal messages |
 | `transport.mjs` | The jailbreak installer's link: collision rules and a read-back after every send |
 | `gamesend.mjs` | Sending a game: C libraries first, a space check, then each variable read back |
+| `archroom.mjs` | How much free archive a send needs |
 | `ce-send.mjs` | The Send to calculator buttons on the download pages |
 | `feedback-box.mjs` | The feedback box a page opens under a question, and the link under a failed connect or send |
 | `installer.mjs` | The TI-84 Plus CE jailbreak installer, which sends [arTIfiCE](https://github.com/YvanTT/arTIfiCE) |

@@ -7,6 +7,7 @@
 import { NAMED, NO_CERT_NAME, compatibility, digest, familyCE, isCE, isEvoDevice, launchesArchived, programRunning, refusal, unnamedCE } from './core.mjs';
 import { CELink } from '../celink.mjs';
 import { parseFile, TYPE } from '../tifiles.mjs';
+import { ARCHIVE_MARGIN, archiveRoom } from './archroom.mjs';
 
 export const PROGRAMS = [TYPE.PROGRAM, TYPE.PROTECTED_PROGRAM];
 const SIZE_WORD = [...PROGRAMS, TYPE.APPVAR, TYPE.TEMP_PROGRAM];
@@ -447,15 +448,9 @@ export function startRoute(route, tools = []) {
 // the generous side, so a refusal means the send really would run out.
 const cost = (e, archived) => e.data.length + e.name.length + (archived ? 20 : 9);
 
-// The archive refuses a variable while it still lists free space: it behaves
-// as if a variable must fit inside one 64 KB flash sector's free run and one
-// sector is held back for garbage collection. Observed in an emulator running
-// OS 5.8.5: with 190 KB listed free a 40 KB variable fitted and a 45 KB one
-// was refused, a game whose files needed 88 KB was refused with 190 KB free,
-// and one whose files needed 354 KB (four of them 64 KB) was refused with
-// 490 KB free. So a send needs room for itself, for its two largest archived
-// variables once more, and one sector beyond that.
-export const ARCHIVE_MARGIN = 65536;
+// The archive's own rule (ARCHIVE_MARGIN, archiveRoom) lives in archroom.mjs,
+// so a page can check the room without loading this module.
+export { ARCHIVE_MARGIN, archiveRoom };
 
 /**
  * The free RAM an assembly game needs to start: it is copied to RAM to run,
@@ -504,7 +499,8 @@ export function planInstall(entries, { rows, ramFree = null, archiveFree = null,
   // RAM freed by a delete is back at once, but the delete runs only just
   // before its own file, so RAM is a running balance in send order. Freed
   // archive may not come back until a garbage collection, so it is not counted.
-  let ramNeed = 0, arcNeed = 0, arcLargest = 0, arcSecond = 0, ramBack = 0, balance = ramFree ?? 0, low = balance;
+  let ramNeed = 0, ramBack = 0, balance = ramFree ?? 0, low = balance;
+  const arcSizes = [];
   for (const s of steps) {
     for (const r of s.remove) {
       if (r.archived || r.size == null) continue;
@@ -513,10 +509,7 @@ export function planInstall(entries, { rows, ramFree = null, archiveFree = null,
       balance += freed;
     }
     if (s.archived) {
-      const c = cost(s.entry, true);
-      arcNeed += c;
-      if (c > arcLargest) [arcLargest, arcSecond] = [c, arcLargest];
-      else arcSecond = Math.max(arcSecond, c);
+      arcSizes.push(cost(s.entry, true));
     } else {
       const c = cost(s.entry, false);
       ramNeed += c;
@@ -524,7 +517,7 @@ export function planInstall(entries, { rows, ramFree = null, archiveFree = null,
       low = Math.min(low, balance);
     }
   }
-  const arcReserve = arcNeed ? arcLargest + arcSecond + ARCHIVE_MARGIN : 0;
+  const { need: arcNeed, reserve: arcReserve } = archiveRoom(arcSizes);
   const space = { ramNeed, arcNeed, arcReserve, ramBack, ramFree, archiveFree, ramShort: ramFree == null ? 0 : Math.max(0, -low) };
   const warnings = [];
   const start = ramToStart(entries, launchRam);
