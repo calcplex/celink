@@ -32,3 +32,45 @@ export function archiveRoom(sizes) {
   }
   return { need, reserve: need ? largest + second + ARCHIVE_MARGIN : 0 };
 }
+
+// The same rule by sector, from the calculator's listing. Observed in an
+// emulator running OS 5.3.0, 5.3.1 and 5.8.5, reading the flash: the archive
+// is a run of 64 KB sectors, each a status byte and 65,535 bytes; a variable
+// never crosses a sector's end; its entry there is its size, its name and 10
+// bytes of header; one erased sector is always held back; and the free figure
+// counts every sector's unused tail. So the free figure alone cannot say
+// whether a variable fits: 312 KB free in whole sectors took a send that
+// 475 KB free in tails refused. A new variable goes into the first sector
+// with room for it, else into an erased one; a garbage collection repacks
+// the live variables first fit in their flash order.
+export const SECTOR_BYTES = 65535;
+
+/** A variable's room in an archive sector: its size, its name and the header. */
+export function entryBytes(size, nameLength) {
+  return size + (nameLength == null ? 8 : nameLength) + 10;
+}
+
+/**
+ * Do the variables `sending` go in beside the archived ones? Both are lists
+ * of entry sizes (entryBytes): `archived` in the listing's order, `sending`
+ * in the order the send writes them, since the calculator places each one as
+ * it arrives. `archiveFree` is the free figure the calculator reports. Places
+ * the archived variables first fit, as a garbage collection would, then the
+ * new ones first fit, never into the held-back sector.
+ * -> { sectors (the archive's, the held-back one included), used, fits }
+ */
+export function sectorFit(archived, sending, archiveFree) {
+  let live = 0;
+  for (let i = 0; i < archived.length; i++) live += archived[i];
+  const sectors = Math.round((live + archiveFree + SECTOR_BYTES + 1) / SECTOR_BYTES);
+  const bins = [];
+  const place = function (c) {
+    for (let i = 0; i < bins.length; i++) {
+      if (bins[i] + c <= SECTOR_BYTES) { bins[i] += c; return; }
+    }
+    bins.push(c);
+  };
+  for (let i = 0; i < archived.length; i++) place(archived[i]);
+  for (let i = 0; i < sending.length; i++) place(sending[i]);
+  return { sectors, used: bins.length, fits: bins.length <= sectors - 1 };
+}
