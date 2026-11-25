@@ -303,7 +303,7 @@ function reportFix(choice) {
     `If it mentions LibLoad or libraries, send the game again from <a href="${GAMES}">our games page</a>.`,
   ]);
   // Turn on the jailbreak: AsmHook2 missing means the last file never took.
-  if (state.screen === 'v3_finish') return p(['If AsmHook2 isn\'t in apps, the install didn\'t finish. Press Start over and do the steps again.']);
+  if (state.screen === 'v3_finish') return p(['Press <kbd>apps</kbd>. If AsmHook2 isn\'t there, the install didn\'t finish: press Start over and do the steps again.']);
   return p([replug, manual('Still stuck? Try the')]);
 }
 // Help chat at the end of the panel: the footer's own link (Plexy's), so it
@@ -555,9 +555,11 @@ function fail(err) {
     const go = el.querySelector('[data-go="install"]');
     if (go) go.onclick = () => { if (!state.busy) viewInstallTIConnect(); };
   } else {
-    el.textContent = (onChromeOS() && CHROMEOS_OUTCOME_TEXT[chromeosKey(err, reason)]) || OUTCOME_TEXT[reason]
+    // In the calculator's own key names, as say() writes them: Send Snake's
+    // space refusals name 2nd.
+    el.textContent = ownKeys((onChromeOS() && CHROMEOS_OUTCOME_TEXT[chromeosKey(err, reason)]) || OUTCOME_TEXT[reason]
       || (reason === 'timeout' ? timeoutText(err) : null)
-      || (unknownRefusal(err) ? retryText(err.calcError) : null) || refusalText(err) || err?.message || String(err);
+      || (unknownRefusal(err) ? retryText(err.calcError) : null) || refusalText(err) || err?.message || String(err));
   }
   el.hidden = false;
   if (APP) {
