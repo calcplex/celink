@@ -23,13 +23,14 @@
 //                                         unless the transport counts them itself
 //   exit_test_mode_feedback {reason}      a report was sent (the last outcome)
 //
-// The feedback box is the CE download pages' (the same classes, words and
-// form, through core.mjs's feedbackText and sendFeedback): "Something not
-// working? Tell us" under the panel opens it, and it opens by itself under a
-// failed exit. What the page knows rides in front of the student's words:
-// the tool, the calculator, the last outcome, the browser and the computer
-// (one coarse word each) and the page. A preview posts nothing.
-import { FEEDBACK_FORM, FEEDBACK_MAX, PREVIEW_HOST, esc, feedbackText, platformName, sendFeedback, track } from './core.mjs';
+// The feedback box is feedback-box.mjs, the CE download pages' own:
+// "Something not working? Tell us" under the panel opens it, and it opens by
+// itself under a failed exit. What the page knows when the box opens rides in
+// front of the student's words: the tool, the calculator, the last outcome,
+// the browser and the computer (one coarse word each) and the page. A preview
+// posts nothing.
+import { esc, platformName, track } from './core.mjs';
+import { feedbackBox } from './feedback-box.mjs';
 
 // The words both calculators share; `short` is the calculator's short name.
 export const WORDS = {
@@ -41,9 +42,6 @@ export const WORDS = {
   notLoaded: "The tool didn't load properly. <strong>Reload the page</strong> and try again. If that doesn't help, hold <strong>Shift</strong> while you click reload to fetch a fresh copy.",
   fbAsk: "What didn't work?",
   fbAskFailed: 'What happened?',
-  fbSend: 'Send',
-  fbDone: 'Thank you! We read every response and will do our best to improve.',
-  fbErr: `That didn't send. Try again, or <a href="${FEEDBACK_FORM}/viewform" target="_blank" rel="noopener">open the form</a>.`,
 };
 
 /** The browser as one coarse word and its major version ("chrome 131"); '' when it doesn't say. */
@@ -79,11 +77,15 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
   const base = new Map([[conn, conn.className], [status, status.className]]);
   const say = (el, cls, html) => { el.className = base.get(el) + (cls ? ` ${cls}` : ''); el.innerHTML = html; };
   let busy = false;
-  let boxes = 0;          // feedback boxes opened (their textarea ids); set before the can't-run return, which still wires the box
   let last = '';          // the last outcome, for the feedback tag and event
   let picker = '';        // this click's device list, when one was shown
   let listShown = false;  // a device list was opened on this page load
   const crossLink = () => `<a href="${esc(T.other.href)}">Use the ${esc(T.other.short)} tool</a>.`;
+  // Made before the can't-run return, which still wires the box.
+  const feedback = feedbackBox({
+    prefix: 'Exit test mode',
+    track: () => track('exit_test_mode_feedback', { reason: (last.split(': ')[1] || last || 'none').replace(/\s+/g, '_') }),
+  });
 
   const kind = T.support();
   if (kind) {
@@ -175,18 +177,14 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
     if (e.target.closest?.('.ce-connect-again')) run();
   });
 
-  // ---- the feedback box (the CE download pages': classes, words, form)
-  function feedbackParts() {
-    return ['Exit test mode', T.name, last || 'no exit yet', picker && `picker ${picker}`, browserName(nav), platformName(nav), globalThis.location?.pathname, PREVIEW_HOST ? 'PREVIEW' : ''];
-  }
+  // ---- the feedback box (feedback-box.mjs): its tag is the outcome (note),
+  // then this click's list, the browser and the computer (route)
   function openFeedback(afterFail = false) {
     if (!fbSlot) return;
     const old = fbSlot.querySelector('.ce-fb');
     const text = old?.querySelector('textarea')?.value ?? '';
-    const id = `exit-fb-${++boxes}`;
-    fbSlot.innerHTML = `<div class="ce-fb"><label for="${id}">${esc(afterFail ? WORDS.fbAskFailed : WORDS.fbAsk)}</label>`
-      + `<textarea id="${id}" rows="3" maxlength="${FEEDBACK_MAX}">${esc(text)}</textarea>`
-      + `<p class="ce-fb-row"><button type="button" class="ce-fb-send"${text.trim() ? '' : ' disabled'}>${esc(WORDS.fbSend)}</button></p></div>`;
+    const route = [picker && `picker ${picker}`, browserName(nav), platformName(nav)].filter(Boolean).join(' · ');
+    fbSlot.innerHTML = feedback.html(T.name, { ask: afterFail ? WORDS.fbAskFailed : WORDS.fbAsk, note: last || 'no exit yet', route, text });
     if (fbLine) fbLine.hidden = true;
     if (!afterFail) fbSlot.querySelector('textarea').focus();
   }
@@ -200,31 +198,7 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
   function wireFeedback() {
     if (!fbSlot) return;
     fbOpen?.addEventListener('click', e => { e.preventDefault(); openFeedback(false); });
-    fbSlot.addEventListener('input', e => {
-      const fb = e.target.closest?.('.ce-fb');
-      if (fb) fb.querySelector('.ce-fb-send').disabled = fb.hasAttribute('data-busy') || !e.target.value.trim();
-    });
-    fbSlot.addEventListener('click', async e => {
-      const go = e.target.closest?.('.ce-fb-send');
-      if (!go) return;
-      const fb = go.closest('.ce-fb');
-      const text = fb.querySelector('textarea').value.trim();
-      if (!text || fb.hasAttribute('data-busy')) return;
-      fb.setAttribute('data-busy', '1');
-      go.disabled = true;
-      fb.querySelector('.ce-fb-err')?.remove();
-      try {
-        if (PREVIEW_HOST) console.info('[not sent: preview]', 'feedback', feedbackText(text, feedbackParts()));
-        else await sendFeedback(text, feedbackParts());
-        fb.removeAttribute('data-busy');
-        fb.innerHTML = `<p class="ce-fb-done">${esc(WORDS.fbDone)}</p>`;
-        track('exit_test_mode_feedback', { reason: (last.split(': ')[1] || last || 'none').replace(/\s+/g, '_') });
-      } catch {
-        fb.removeAttribute('data-busy');
-        go.disabled = false;
-        go.closest('.ce-fb-row').insertAdjacentHTML('afterend', `<p class="ce-fb-err">${WORDS.fbErr}</p>`);
-      }
-    });
+    feedback.watch(fbSlot);
   }
 
   wireFeedback();
