@@ -133,8 +133,9 @@ export function readyEach(link) {
 
 /**
  * { model, os, boot, route, ramFree, archiveFree, home }, refusing anything
- * but a CE. With `family` (the jailbreak installer's sends) the rest of the
- * TI-84 Plus CE family passes too (familyCE).
+ * but a CE. With `family` (the jailbreak installer's sends, and the pages
+ * the build marks for it, core's familyPage) the rest of the TI-84 Plus CE
+ * family passes too (familyCE).
  */
 export async function identify(link, { family = false } = {}) {
   const info = await link.info();
@@ -365,10 +366,11 @@ export function ownedAfterDelete(owned, r) {
  * size match; without it nothing more is read and `owned` is []. Free RAM
  * read as 0 is read again after the listing (freeRamAgain). A listing that
  * times out (readyEach's `listing`) carries the calculator's `route`.
+ * With `family`, the rest of the TI-84 Plus CE family is taken too (identify).
  */
-export async function inspect(openLink, { own = [] } = {}) {
+export async function inspect(openLink, { own = [], family = false } = {}) {
   const link = readyEach(openLink);
-  const first = await identify(link);
+  const first = await identify(link, { family });
   const rows = await link.list().catch(err => {
     // The page words a listing that went silent by route.
     if (err?.listing) err.route = first.route;

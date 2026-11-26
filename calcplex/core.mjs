@@ -640,12 +640,23 @@ export function checkCalculator(model, os, { productNumber, usbProductId } = {})
 /**
  * `html` (or plain text) with the key names printed on `model`'s keypad. On a
  * TI-83 Premium CE, 2nd is labelled 2nde, and apps is reached with 2nde then
- * résol; no other key is renamed. For any other model `html` comes back as
- * it is.
+ * résol (the key, <kbd>apps</kbd> or a plain "press apps"; the apps menu
+ * keeps its name); no other key is renamed. For any other model `html` comes
+ * back as it is.
  */
 export function keyNames(html, model) {
   if (!/^TI-83 Premium CE/.test(model ?? '')) return html;
-  return String(html).replace(/<kbd>apps<\/kbd>/g, '<kbd>2nde</kbd> <kbd>résol</kbd>').replace(/\b2nd\b/g, '2nde');
+  return String(html).replace(/<kbd>apps<\/kbd>/g, '<kbd>2nde</kbd> <kbd>résol</kbd>').replace(/\b([Pp]ress) apps\b/g, '$1 2nde résol').replace(/\b2nd\b/g, '2nde');
+}
+
+/**
+ * Whether this page takes the rest of the TI-84 Plus CE family (familyCE) as
+ * well as a TI-84 Plus CE: the build marks an element of the page
+ * data-ce-family. The sending pages pass it to inspect() and sendGame() as
+ * `family`.
+ */
+export function familyPage(doc = globalThis.document) {
+  return !!doc?.querySelector?.('[data-ce-family]');
 }
 
 // arTIfiCE v3 installs through TI's Inequality Graphing app, so the installer
@@ -731,8 +742,9 @@ export function platformName(nav) {
 //                as four lower-case hex digits, e.g. e003 (notCEParams)
 //   evo_hw       ce_connect_fail other_model or wrong_model: the model the calculator named,
 //                as ce_calc_info sends it, when it is plain letters, digits, spaces and + . -;
-//                the installer's events once it has read the model (trackWith): that model,
-//                as its ce_calc_info sent it
+//                the installer's events once it has read the model (trackWith), and the
+//                sending pages' events once they have (trackModel): that model, as their
+//                ce_calc_info sent it
 
 export const PREVIEW_HOST = typeof location !== 'undefined' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
@@ -743,10 +755,20 @@ export function trackWith(params) {
   pageParams = params;
 }
 
+// The model of the calculator a sending page last read (trackModel): every
+// event after it names it in evo_hw, as ce_calc_info does, so sends and
+// their failures split by model. Its own slot, so a page's trackWith and a
+// second sender on the same page never replace it. An event's own evo_hw and
+// a page's parameters win over it.
+let seenModel = '';
+export function trackModel(model) {
+  seenModel = typeof model === 'string' && PLAIN_MODEL.test(model) ? model : '';
+}
+
 /** Send a GA4 event; a localhost preview logs it instead, so test runs are not counted. */
 export function track(event, params) {
   try {
-    const extra = pageParams();
+    const extra = { ...(seenModel ? { evo_hw: seenModel } : {}), ...pageParams() };
     if (Object.keys(extra).length) params = { ...extra, ...params };
     if (PREVIEW_HOST) console.info('[not sent: preview]', event, params);
     else if (typeof window.gtag === 'function') window.gtag('event', event, params);

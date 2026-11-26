@@ -48,6 +48,7 @@ import {
   startHelpAnswer, startHelpChoices, startHelpShown, startHint, startReporter, track, trackConnectFail, withKeyHelp, findHelpAnswer, findHelpShown,
   rateParams, ratedNote, ratedStars, rememberRating, rememberSend, sentAgo, evoAddress, evoHtml, evoText, isEvoDevice,
   openDetail, tabHandoff, TAB_BUSY_TEXT, joinLabels, partsOf, baseOf, needsAsm, sendOutcome, stallLog, stallText, stallDetail, modal,
+  familyPage, keyNames, trackModel,
 } from './core.mjs';
 import { CELink } from '../celink.mjs';
 import * as SC from './sendconnect.mjs';
@@ -87,6 +88,9 @@ const MATH = '/downloads/ti84plusce/math/';
 // A DOWNLOAD_FIRST game takes two steps in the same card: its download as the
 // card's button (GATE_TEXT), then the Connect split.
 const FIRST = SETUP.ceFirst != null;
+// The rest of the TI-84 Plus CE family is taken too where the build marks the
+// page (core's familyPage): connect and Send pass it to inspect and sendGame.
+const FAMILY = familyPage();
 const GATE_TEXT = label => `${esc(label)}'s author asked that the license and readme come with the game, so download it first and read them. Then you can send it here.`;
 const GATE_DONE = 'Downloaded. Now connect your calculator to send it.';
 const GATE_SEND = 'Downloaded. Now click Send to calculator to send it.';
@@ -355,6 +359,10 @@ const programWords = () => page === 'math' || page === 'program';
 const wordsPage = () => (page === 'program' ? 'math' : page);
 const basic = () => page === 'math' || (page === 'program' && !ASM);
 let link = null, calc = null;
+// The model the last connect read: the words a card or panel shows name its
+// keys (core's keyNames), and every event after it names it (trackModel).
+let model = '';
+const ownKeys = html => (html ? keyNames(html, model) : html);
 let busy = false, connecting = false, present = false, sendAnyway = false;
 // The errors of connects that failed (a send's Connect too), and the last one
 // a click made: the hub panel's feedback link names it.
@@ -432,7 +440,7 @@ async function connect(say, { quiet = false } = {}) {
     await l.open();
     // No list in 5 s means no Delete this time, never a slower connect.
     const own = pending ? await capped(pending, 5000).catch(() => []) : [];
-    calc = await inspect(l, { own });
+    calc = await inspect(l, { own, family: FAMILY });
     // Another tab's Connect click came while this one connected on its own.
     if (quiet && parked) throw refusal('CANCELLED', 'Another tab took the calculator.');
   } catch (err) {
@@ -447,6 +455,8 @@ async function connect(say, { quiet = false } = {}) {
     throw err;
   }
   link = l;
+  model = calc.model;
+  trackModel(model);
   track('ce_calc_info', { ...calcParams(calc), route: calc.route, page, jb: jailbreakState(calc.route, calc.tools), ...SC.pickerParams() });
   await announceContents({ fresh: false });
   refreshPresent();
@@ -727,6 +737,7 @@ async function run({ file, label, say, show }) {
         onProgress: (done, total) => { if (total) sending(Math.min(99, Math.round(done / total * 100))); },
         // The calculator shows "Defragmenting..." meanwhile; the next progress replaces this.
         onBusy: () => say(DEFRAG_TEXT, pct),
+        family: FAMILY,
       });
     } catch (err) {
       // A listing before or between the files that went silent; the link drops below.
@@ -956,7 +967,7 @@ function watchHelp(root) {
       b.setAttribute('aria-pressed', String(b === pick));
     }
     const d = panel.dataset;
-    panel.querySelector('.ce-help-fix').innerHTML = `<p>${answerHtml(startHelpAnswer(d.route, pick.dataset.help, { os: d.os, name: d.game, jb: d.jb, shell: d.shell }))}</p>`;
+    panel.querySelector('.ce-help-fix').innerHTML = `<p>${ownKeys(answerHtml(startHelpAnswer(d.route, pick.dataset.help, { os: d.os, name: d.game, jb: d.jb, shell: d.shell })))}</p>`;
     reportFrom(panel, pick.dataset.help);
   });
 }
@@ -1282,7 +1293,7 @@ function mountGame() {
   const say = t => { progress.textContent = t || ''; };
   const show = (html, kind) => {
     outcome = kind;
-    result.innerHTML = CLOSE_X + html;
+    result.innerHTML = CLOSE_X + ownKeys(html);
     result.className = `ce-leaf-result is-${kind}`;
     result.hidden = false;
     changed();
@@ -1351,7 +1362,7 @@ function mountGame() {
     const gateGame = FIRST && !!DOWNLOAD_FIRST[file];
     const gated = gateGame && !onCalc && !wasDownloaded(file);
     msg.innerHTML = gated ? GATE_TEXT(label) : connected || connecting
-      ? statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : refused ? '' : 'Click Send to calculator to install it.', (stuck || refused) && (floorText || true))
+      ? ownKeys(statusHtml(onCalc ? `${esc(label)} is already on your calculator.` : refused ? '' : 'Click Send to calculator to install it.', (stuck || refused) && (floorText || true)))
       : parked && parkedFor === 'page' ? IN_OTHER_TAB : gateGame ? GATE_DONE : 'Plug in your TI-84 Plus CE, turn it on, and click Connect to send this game.';
     const kind = statusKind();
     card.className = 'ce-conn is-leaf' + (kind ? ' ' + kind : outcome === 'bad' ? ' bad' : '');
@@ -1411,7 +1422,7 @@ function mountProgram() {
   watchDownloads(document);
   const [msg, err, button] = box.children;
   const show = (html, kind) => {
-    status.innerHTML = html && kind !== 'busy' ? CLOSE_X + html : html;
+    status.innerHTML = ownKeys(html && kind !== 'busy' ? CLOSE_X + html : html);
     status.className = `ce-card-status is-${kind}`;
     return status;
   };
@@ -1444,7 +1455,7 @@ function mountProgram() {
     const connected = !!(link && calc);
     const kind = statusKind();
     box.className = 'ce-conn ce-program' + (kind ? ' ' + kind : boxError && !connected ? ' bad' : '');
-    msg.innerHTML = connected ? verdict(calc, where)
+    msg.innerHTML = connected ? ownKeys(verdict(calc, where))
       : connecting ? 'Connecting to your calculator…'
         : parked && parkedFor === 'page' ? IN_OTHER_TAB
           : parked ? 'When you’re done jailbreaking, connect your calculator again.'
@@ -1541,10 +1552,10 @@ function mountPanel(before, where) {
     panel.className = 'ce-conn' + (kind ? ' ' + kind : panelError ? ' bad' : '');
     if ((link && calc) || connecting) {
       if (link && calc) typing = null;
-      panel.innerHTML = `<p class="msg">${statusHtml(where)}</p>`;
+      panel.innerHTML = `<p class="msg">${ownKeys(statusHtml(where))}</p>`;
       return;
     }
-    panel.innerHTML = `<p class="msg">${statusHtml(where)}</p>
+    panel.innerHTML = `<p class="msg">${ownKeys(statusHtml(where))}</p>
       ${panelError ? SC.errBlock(panelError) : ''}
       <button type="button" class="ce-conn-go"${busy ? ' disabled' : ''}>${SC.panelButton(panelError)}</button>${panelError ? '' : SC.hintHtml(SETUP)}`;
     const button = panel.querySelector('.ce-conn-go');
@@ -1588,7 +1599,7 @@ function mountSplit(card, a) {
     card.after(status);
   } else [...card.querySelectorAll('.wp-block-button.floated')].at(-1).after(status);
   const show = (html, kind) => {
-    status.innerHTML = html && kind !== 'busy' ? CLOSE_X + html : html;
+    status.innerHTML = ownKeys(html && kind !== 'busy' ? CLOSE_X + html : html);
     status.className = `ce-card-status is-${kind}`;
     return status;
   };
