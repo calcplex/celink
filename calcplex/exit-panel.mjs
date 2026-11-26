@@ -74,6 +74,7 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
   const status = $('.exit-status');
   const fbSlot = $('.exit-fb-slot');
   const fbOpen = $('.exit-fb-open');
+  const fbLine = $('.exit-fb-line');  // "Something not working? Tell us", hidden while the box is open
   const T = transport;
   const base = new Map([[conn, conn.className], [status, status.className]]);
   const say = (el, cls, html) => { el.className = base.get(el) + (cls ? ` ${cls}` : ''); el.innerHTML = html; };
@@ -186,11 +187,15 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
     fbSlot.innerHTML = `<div class="ce-fb"><label for="${id}">${esc(afterFail ? WORDS.fbAskFailed : WORDS.fbAsk)}</label>`
       + `<textarea id="${id}" rows="3" maxlength="${FEEDBACK_MAX}">${esc(text)}</textarea>`
       + `<p class="ce-fb-row"><button type="button" class="ce-fb-send"${text.trim() ? '' : ' disabled'}>${esc(WORDS.fbSend)}</button></p></div>`;
+    if (fbLine) fbLine.hidden = true;
     if (!afterFail) fbSlot.querySelector('textarea').focus();
   }
   function closeFeedback() {
     const fb = fbSlot?.querySelector('.ce-fb');
-    if (fb && !fb.querySelector('textarea')?.value.trim()) fbSlot.innerHTML = '';
+    if (fb && !fb.querySelector('textarea')?.value.trim()) {
+      fbSlot.innerHTML = '';
+      if (fbLine) fbLine.hidden = false;
+    }
   }
   function wireFeedback() {
     if (!fbSlot) return;

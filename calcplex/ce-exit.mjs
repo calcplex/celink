@@ -75,10 +75,10 @@ export function reasonOf(err) {
 // The CE's own lines. The connect help (an empty or closed list, a refused
 // open, a calculator another program holds) is the CE pages' (sendconnect.mjs).
 export const WORDS = {
-  done: 'Done. Test mode is off. The blue TEST MODE ENABLED bar is gone from the top of the screen.',
+  done: 'Done. Test mode is off.',
   open: "Couldn't open the CE. Close anything else using it (TI Connect CE or another tab), unplug it, plug it back in, then try again.",
   link: 'The CE stopped answering. Unplug it, plug it back in, then try again.',
-  taken: 'This CE already has AppVars named EXITTEST through EXITTES9, so nothing was sent.',
+  elsewhere: 'Use a different computer.',
   browser: 'This tool needs <strong>Chrome</strong> or <strong>Edge</strong> on a computer. This browser can\'t connect to a CE.',
   mobile: 'Exiting test mode needs a <strong>computer</strong> (Windows, Mac, or Chromebook) running <strong>Chrome</strong> or <strong>Edge</strong>. Phones and tablets can\'t connect to the calculator.',
 };
@@ -150,18 +150,22 @@ export function transport({ usb, nav = globalThis.navigator } = {}) {
     isWrong: err => reasonOf(err) === 'evo',
     /**
      * The CE pages' fix for a failed connect, or the CE's own line. A
-     * Chromebook's blocked-USB fix offers a game's file, so here, as on the
-     * notes tool, the CE's own words stand instead.
+     * Chromebook that refused the open twice gets the CE pages' first two
+     * sentences (it blocks USB devices); their next step offers a game's
+     * file, so here the next step is another computer.
      */
     failHtml(err) {
       SC.noteFail(err, { cros: cros() });
       const c = ctx();
-      const fix = SC.failKind(err, c) === 'chromeos_blocked' ? null : SC.failPanel(err, c);
+      if (SC.failKind(err, c) === 'chromeos_blocked') {
+        const cause = /<p>([\s\S]*?)<\/p>/.exec(SC.failPanel(err, c) ?? '');
+        return cause ? `${cause[1]} ${WORDS.elsewhere}` : WORDS.open;
+      }
+      const fix = SC.failPanel(err, c);
       if (fix) return fix;
       switch (reasonOf(err)) {
         case 'no_device': return null;
         case 'open_failed': return WORDS.open;
-        case 'name_taken': return WORDS.taken;
         default: return WORDS.link;
       }
     },
