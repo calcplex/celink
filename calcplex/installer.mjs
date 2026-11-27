@@ -1539,19 +1539,18 @@ const appCredits = () => (CREDITS.length ? `<details class="cec-app-credits">
         <li><strong>This installer</strong>, by CalcPlex. GPL. ${creditLink(['Source', CELINK])}</li></ul>
     </details>` : '');
 
-// Four segments and their words. The segment on show fills halfway, or, while
-// the v3 chain runs, as far as the chain has got. A last screen (jailbroken,
-// a game ready, no jailbreak needed, already jailbroken) shows the bar full.
+// Four segments and their words. The steps done and the step on show are full
+// segments, the steps ahead empty; a last screen (jailbroken, a game ready, no
+// jailbreak needed, already jailbroken) shows all four full.
 const appDone = () => /^(play|native|v21_found|back|v21_run)/.test(state.screen || '');
 function appProgress() {
   // Updating to OS 5.4.0 is the native route's Install step, done once it is.
   const native = state.info?.route === 'native' && !/^os540_/.test(state.screen || '') && !state.os540Done;
   const done = appDone();
   const at = done ? STEPS.length - 1 : state.step;
-  let fill = done ? 1 : 0.5;
   const segs = STEPS.map((label, i) => {
     const cls = native && i === 2 ? 'is-skipped' : done || i < at ? 'is-done' : i === at ? 'is-now' : '';
-    return `<li class="${cls}"${i === at ? ` aria-current="step" style="--fill:${fill}"` : ''}><span>${label}</span></li>`;
+    return `<li class="${cls}"${i === at ? ' aria-current="step"' : ''}><span>${label}</span></li>`;
   }).join('');
   return `<nav class="cec-progress cec-app-progress" aria-label="Progress"><ol>${segs}</ol>
     <p class="cec-app-steplabel">Step ${at + 1} of ${STEPS.length} <span aria-hidden="true">·</span> ${STEPS[at]}</p></nav>`;
