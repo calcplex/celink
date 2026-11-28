@@ -75,7 +75,6 @@ export function reasonOf(err) {
 // The CE's own lines. The connect help (an empty or closed list, a refused
 // open, a calculator another program holds) is the CE pages' (sendconnect.mjs).
 export const WORDS = {
-  done: 'Done. Test mode is off.',
   open: "Couldn't open the CE. Close anything else using it (TI Connect CE or another tab), unplug it, plug it back in, then try again.",
   link: 'The CE stopped answering. Unplug it, plug it back in, then try again.',
   elsewhere: 'Use a different computer.',
@@ -169,6 +168,5 @@ export function transport({ usb, nav = globalThis.navigator } = {}) {
         default: return WORDS.link;
       }
     },
-    doneHtml: WORDS.done,
   };
 }

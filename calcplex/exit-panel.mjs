@@ -9,6 +9,12 @@
 // calculator's own lines; everything else is here: the shared words, the
 // in-flight guard, the counting and the feedback box.
 //
+// The panel is the game pages' send box (.evo-sendbox): the line on top, the
+// button, the status under it. After a good exit the line on top says so and
+// keeps saying it until the next click: an unplug does not take it back, and
+// neither does a replug, which the page cannot tell from a calculator that
+// restarts on its own after the exit.
+//
 // Counting (analytics; fixed vocabularies, nothing personal). Every page that
 // mounts this panel sends the same events; the page path tells them apart:
 //   exit_test_mode_unsupported {reason}   this browser can't (browser | mobile | not_loaded)
@@ -39,6 +45,7 @@ export const WORDS = {
   ready: '<strong>Calculator connected.</strong> Click Exit test mode below.',
   picking: 'Select your calculator in the popup…',
   working: 'Taking the calculator out of test mode…',
+  done: '<strong>Test mode is off.</strong>',
   notLoaded: "The tool didn't load properly. <strong>Reload the page</strong> and try again. If that doesn't help, hold <strong>Shift</strong> while you click reload to fetch a fresh copy.",
   fbAsk: "What didn't work?",
   fbAskFailed: 'What happened?',
@@ -77,10 +84,15 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
   const base = new Map([[conn, conn.className], [status, status.className]]);
   const say = (el, cls, html) => { el.className = base.get(el) + (cls ? ` ${cls}` : ''); el.innerHTML = html; };
   let busy = false;
+  let done = false;       // the last exit landed: the line on top says so until the next click
   let last = '';          // the last outcome, for the feedback tag and event
   let picker = '';        // this click's device list, when one was shown
   let listShown = false;  // a device list was opened on this page load
   const crossLink = () => `<a href="${esc(T.other.href)}">Use the ${esc(T.other.short)} tool</a>.`;
+  // A transport's help block (.ce-fix) goes in the send box's help card, as
+  // the game pages' box shows its help: centred in the box's text column
+  // (.evo-status.evo-box), framed by the CE stylesheet's card (.ce-card-status).
+  const helpCard = html => (html.startsWith('<div class="ce-fix') ? 'evo-box ce-card-status is-bad' : '');
   // Made before the can't-run return, which still wires the box.
   const feedback = feedbackBox({
     prefix: 'Exit test mode',
@@ -92,24 +104,30 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
     track('exit_test_mode_unsupported', { reason: kind });
     say(conn, 'warn', `<p class="msg">${kind === 'not_loaded' ? WORDS.notLoaded : T.unsupportedHtml(kind)}</p>`);
     btn.disabled = true;
+    // the box above is the whole message: no button that can do nothing
+    // (inline, as the send box's row is display:flex, which [hidden] loses to)
+    (btn.closest('.evo-actions') ?? btn).style.display = 'none';
     last = `unsupported: ${kind}`;
     wireFeedback();
     return null;
   }
 
-  async function refresh() {
-    if (busy) return;
-    const present = await T.present();
-    if (busy) return;
+  function paint(present) {
     if (present) say(conn, 'ok', `<p class="msg">${WORDS.ready}</p>`);
     else say(conn, '', `<p class="msg">${WORDS.plug(T.short)}</p>${listShown ? '' : T.hintHtml()}`);
+  }
+  async function refresh() {
+    if (busy || done) return;
+    const present = await T.present();
+    if (busy || done) return;
+    paint(present);
   }
 
   function failed(err, { box = true } = {}) {
     const reason = T.reason(err);
     last = `fail: ${reason}`;
-    const html = T.failHtml(err);
-    say(status, html && html.startsWith('<div class="ce-fix') ? '' : 'err', html ?? '');
+    const html = T.failHtml(err) ?? '';
+    say(status, helpCard(html) || 'err', html);
     if (box) openFeedback(true);
   }
 
@@ -123,7 +141,9 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
     track('exit_test_mode_click', {});
     try {
       // 1. the calculator: the allowed one when it is plugged in, else the list
-      if (!(await T.present())) {
+      const here = await T.present();
+      if (done) { done = false; paint(here); }
+      if (!here) {
         track('exit_test_mode_list', {});
         listShown = true;
         status.textContent = WORDS.picking;
@@ -137,14 +157,15 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
           if (T.isWrong(err)) {
             last = 'wrong calculator';
             track('exit_test_mode_wrong', {});
-            say(status, '', `<p class="msg">That's a ${esc(T.other.name)}. ${crossLink()}</p>`);
+            say(status, '', `That's a ${esc(T.other.name)}. ${crossLink()}`);
             return;
           }
           if (T.isCancel(err)) {
             last = 'cancelled';
             track('exit_test_mode_cancel', picker ? { picker } : {});
             const help = T.failHtml(err) ?? '';
-            say(status, '', T.listShowsOther ? help : `${help} Have a ${esc(T.other.name)}? ${crossLink()}`);
+            const html = T.listShowsOther ? help : `${help} Have a ${esc(T.other.name)}? ${crossLink()}`;
+            say(status, helpCard(html), html);
             return;
           }
           failed(err);
@@ -163,7 +184,9 @@ export function mount(root, transport, { nav = globalThis.navigator } = {}) {
       }
       if (!T.countsExit) track('exit_test_mode_success', picker ? { picker } : {});
       last = 'done';
-      say(status, 'ok', T.doneHtml);
+      done = true;
+      say(conn, 'ok', `<p class="msg">${WORDS.done}</p>`);
+      say(status, '', '');
     } finally {
       busy = false;
       btn.disabled = false;
